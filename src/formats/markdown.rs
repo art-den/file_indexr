@@ -29,7 +29,7 @@ pub fn structure(text: &str) -> FileStructure {
 }
 
 fn try_parse_atx_heading(line: &str) -> Option<(u8, &str)> {
-    let level = usize::min(line.find(|c: char| c != '#').unwrap_or(line.len()), 6);
+    let level = usize::min(line.bytes().take_while(|&b| b == b'#').count(), 6);
     if level == 0 {
         return None;
     }

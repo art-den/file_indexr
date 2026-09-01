@@ -24,10 +24,8 @@ pub fn structure(text: &str) -> FileStructure {
         total_lines += 1;
 
         if let Some((kind, depth, name)) = try_parse_python_heading(line) {
-            // Pop entries at the same or deeper indent (sibling or closed block).
-            while stack.last().is_some_and(|&(d, _)| d >= depth) {
-                stack.pop();
-            }
+            // Drop entries at the same or deeper indent (sibling or closed block).
+            stack.retain(|&(d, _)| d < depth);
 
             let level = match kind {
                 HeadingKind::Class => (stack.len() + 1) as u8,
@@ -86,7 +84,7 @@ fn normalize_heading_text(text: &str) -> Option<String> {
         .map_or(text, |(before, _)| before)
         .trim();
     let text = text.split_once('(').map_or(text, |(before, _)| before);
-    let text = text.trim_end_matches(':').trim();
+    let text = text.trim_end_matches([':', ' ', '\t']);
     (!text.is_empty()).then(|| text.to_string())
 }
 

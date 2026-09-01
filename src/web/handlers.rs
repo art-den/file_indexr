@@ -24,21 +24,44 @@ pub(crate) fn error_response(status: StatusCode, message: impl Into<String>) -> 
     (status, Json(json!({"error": message}))).into_response()
 }
 
+/// Handler error carrying a status code and message.
+/// Rendered as a JSON `{"error": message}` response.
+/// Kept small so it does not trigger `clippy::result_large_err`.
+pub(crate) struct HttpError {
+    status: StatusCode,
+    message: String,
+}
+
+impl HttpError {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+        }
+    }
+}
+
+impl IntoResponse for HttpError {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({"error": self.message}))).into_response()
+    }
+}
+
 async fn load_validated_file(
     config: &Config,
     path: &str,
     cache: &TextDataCache,
-) -> Result<FileTextData, Response> {
+) -> Result<FileTextData, HttpError> {
     let canonical_path = match config.validate_path(path).await {
         PathValidateResult::Valid(p) => p,
         PathValidateResult::OutsideDirectory => {
-            return Err(error_response(
+            return Err(HttpError::new(
                 StatusCode::FORBIDDEN,
                 "Path outside watched directory",
             ));
         }
         PathValidateResult::NotFound => {
-            return Err(error_response(StatusCode::NOT_FOUND, "File not found"));
+            return Err(HttpError::new(StatusCode::NOT_FOUND, "File not found"));
         }
     };
 
@@ -46,7 +69,7 @@ async fn load_validated_file(
         .await
         .map_err(|err| {
             warn!("Failed to load file {:?}: {err}", canonical_path);
-            error_response(
+            HttpError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to load file: {err}"),
             )
@@ -81,7 +104,7 @@ pub(crate) struct FileQuery {
 pub(crate) async fn search_handler(
     State(state): State<AppState>,
     Query(params): Query<SearchQuery>,
-) -> Result<impl IntoResponse, Response> {
+) -> Result<impl IntoResponse, HttpError> {
     let SearchQuery {
         q,
         ext,
@@ -126,7 +149,7 @@ pub(crate) async fn search_handler(
     .await
     .map_err(|err| {
         warn!("Search error: {err}");
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+        HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
     })
     .map(Json)
 }
@@ -136,7 +159,7 @@ pub(crate) async fn search_handler(
 pub(crate) async fn file_handler(
     State(state): State<AppState>,
     Query(params): Query<FileQuery>,
-) -> Result<impl IntoResponse, Response> {
+) -> Result<impl IntoResponse, HttpError> {
     let data = load_validated_file(&state.config, &params.path, &state.text_data_cache).await?;
 
     let content_type = content_type_for_format(data.format);
@@ -154,7 +177,7 @@ pub(crate) async fn file_handler(
 pub(crate) async fn structure_handler(
     State(state): State<AppState>,
     Query(params): Query<FileQuery>,
-) -> Result<impl IntoResponse, Response> {
+) -> Result<impl IntoResponse, HttpError> {
     let data = load_validated_file(&state.config, &params.path, &state.text_data_cache).await?;
     Ok((StatusCode::OK, Json(data.structure())))
 }

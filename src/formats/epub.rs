@@ -74,7 +74,7 @@ fn to_markdown(buffer: &[u8]) -> anyhow::Result<String> {
             warn!("EPUB spine references unknown item id '{idref}'");
             continue;
         };
-        if !item.is_html() {
+        if !item.html {
             continue;
         }
         let entry = resolve_entry_path(&opf_dir, &item.href);
@@ -101,7 +101,10 @@ where
         .map_err(|e| anyhow::anyhow!("Entry '{name}' not found in EPUB archive: {e}"))?;
     let mut buf = Vec::new();
     entry.read_to_end(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    Ok(String::from_utf8(buf).unwrap_or_else(|e| {
+        // Fall back to lossy decoding for non-UTF-8 entries.
+        String::from_utf8_lossy(e.as_bytes()).into_owned()
+    }))
 }
 
 /// `full-path` attribute of the `<rootfile>` element in `META-INF/container.xml`.
@@ -119,8 +122,11 @@ fn parse_opf(xml: &str) -> anyhow::Result<(HashMap<String, OpfItem>, Vec<String>
         let (Some(id), Some(href)) = (attr(tag, "id"), attr(tag, "href")) else {
             continue;
         };
-        let media_type = attr(tag, "media-type").unwrap_or_default();
-        manifest.insert(id, OpfItem { href, media_type });
+        let html = matches!(
+            attr(tag, "media-type").as_deref(),
+            Some("application/xhtml+xml" | "text/html")
+        );
+        manifest.insert(id, OpfItem { href, html });
     }
 
     let spine_region = element_region(xml, "spine")?;
@@ -146,16 +152,8 @@ fn parse_title(opf: &str) -> Option<String> {
 
 struct OpfItem {
     href: String,
-    media_type: String,
-}
-
-impl OpfItem {
-    fn is_html(&self) -> bool {
-        matches!(
-            self.media_type.as_str(),
-            "application/xhtml+xml" | "text/html"
-        )
-    }
+    /// True when the manifest item is an HTML/XHTML document.
+    html: bool,
 }
 
 /// Resolve a manifest `href` against the directory containing the OPF file.
@@ -221,12 +219,20 @@ fn attr(tag: &str, name: &str) -> Option<String> {
         .map(|m| unescape_xml(m.as_str()))
 }
 
+/// The five predefined XML entities, decoded left-to-right in a single pass.
+static XML_ENTITIES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"&lt;|&gt;|&quot;|&apos;|&amp;").unwrap());
+
 fn unescape_xml(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
+    XML_ENTITIES
+        .replace_all(s, |c: &regex::Captures| match c.get(0).unwrap().as_str() {
+            "&lt;" => "<",
+            "&gt;" => ">",
+            "&quot;" => "\"",
+            "&apos;" => "'",
+            _ => "&",
+        })
+        .into_owned()
 }
 
 #[cfg(test)]

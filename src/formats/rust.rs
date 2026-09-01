@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::sync::LazyLock;
 
 use itertools::Itertools;
 
@@ -58,7 +59,7 @@ pub fn structure(text: &str) -> FileStructure {
             pending = None;
 
             let level = compute_level(&stack, item_kind);
-            raw_headings.push((total_lines, level, normalize_heading_text(item_kind, &name)));
+            raw_headings.push((total_lines, level, name));
 
             // Only push onto stack if the block opens on this line (more `{` than `}`).
             // Single-line blocks (`fn foo() {}`) still appear in headings but don't
@@ -244,28 +245,26 @@ fn normalize_heading_text(kind: ItemKind, text: &str) -> String {
     }
 }
 
-fn try_parse_rust_item(line: &str) -> Option<(ItemKind, String)> {
-    use std::sync::LazyLock;
-
-    /// Normalise whitespace: collapse runs of spaces/tabs into a single space.
-    /// Borrows the input when it needs no normalisation.
-    fn normalise(s: &str) -> Cow<'_, str> {
-        // split_whitespace splits on every Unicode whitespace, not just space/tab,
-        // so the borrow fast path must trigger only when no such char is present.
-        if s.contains("  ") || s.chars().any(|c| c.is_whitespace() && c != ' ') {
-            Cow::Owned(s.split_whitespace().join(" "))
-        } else {
-            Cow::Borrowed(s)
-        }
+/// Normalise whitespace: collapse runs of spaces/tabs into a single space.
+/// Borrows the input when it needs no normalisation.
+fn normalise(s: &str) -> Cow<'_, str> {
+    // split_whitespace splits on every Unicode whitespace, not just space/tab,
+    // so the borrow fast path must trigger only when no such char is present.
+    if s.contains("  ") || s.chars().any(|c| c.is_whitespace() && c != ' ') {
+        Cow::Owned(s.split_whitespace().join(" "))
+    } else {
+        Cow::Borrowed(s)
     }
+}
 
-    /// Regex that matches any combination of Rust item modifiers at start of line.
-    /// The parenthesized-visibility alternative must come before the bare `pub\s+`
-    /// so that `pub (crate)` (space before the paren) is consumed whole.
-    static MOD_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"^(?:(?:pub\s*\(\s*(?:in\s+[\w:]+|crate|super|self)\s*\)\s+|pub\s+|async\s+|const\s+|unsafe\s+|extern\s+"[^"]*"\s+)*)"#).unwrap()
-    });
+/// Regex that matches any combination of Rust item modifiers at start of line.
+/// The parenthesized-visibility alternative must come before the bare `pub\s+`
+/// so that `pub (crate)` (space before the paren) is consumed whole.
+static MOD_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"^(?:(?:pub\s*\(\s*(?:in\s+[\w:]+|crate|super|self)\s*\)\s+|pub\s+|async\s+|const\s+|unsafe\s+|extern\s+"[^"]*"\s+)*)"#).unwrap()
+});
 
+fn try_parse_rust_item(line: &str) -> Option<(ItemKind, String)> {
     let line = normalise(line);
     // MOD_RE can match the empty string, so `find` always succeeds.
     let stripped = &line[MOD_RE.find(&line).unwrap().end()..];
@@ -282,13 +281,16 @@ fn try_parse_rust_item(line: &str) -> Option<(ItemKind, String)> {
         if let Some(rest) = stripped.strip_prefix(prefix) {
             // `rest` is a suffix of the trimmed, normalised line, so it is
             // non-empty and free of surrounding whitespace.
-            return Some((kind, rest.to_string()));
+            return Some((kind, normalize_heading_text(kind, rest)));
         }
     }
 
     // `impl` — bare, followed by `<` or ` `.
     if stripped == "impl" || stripped.starts_with("impl<") || stripped.starts_with("impl ") {
-        return Some((ItemKind::Imp, stripped.to_string()));
+        return Some((
+            ItemKind::Imp,
+            normalize_heading_text(ItemKind::Imp, stripped),
+        ));
     }
 
     None
