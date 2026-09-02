@@ -217,11 +217,14 @@ async fn shutdown_signal() {
 fn init_logging(verbose: bool) {
     let level = if verbose { "debug" } else { "info" };
     // Always write logs to stderr so stdout is clean for MCP transport payloads.
+    // Disable ANSI colors on Windows: legacy cmd.exe consoles do not interpret
+    // escape sequences, so they would render as garbled text.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level)),
         )
         .with_writer(std::io::stderr)
+        .with_ansi(cfg!(not(windows)))
         .init();
 }
