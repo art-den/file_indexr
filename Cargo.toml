@@ -23,6 +23,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 tower-http = { version = "0.5", features = ["cors"] }
 html-to-markdown-rs = "3.10"
+encoding_rs = "0.8"
 moka = { version = "0.12", features = ["sync"] }
 unpdf = { version = "0.4" }
 zip = "8.6.0"

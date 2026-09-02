@@ -78,10 +78,11 @@ fn to_markdown(buffer: &[u8]) -> anyhow::Result<String> {
             continue;
         }
         let entry = resolve_entry_path(&opf_dir, &item.href);
-        let Ok(html) = read_entry(&mut archive, &entry) else {
+        let Ok(html_bytes) = read_entry_bytes(&mut archive, &entry) else {
             warn!("EPUB spine entry '{entry}' is missing from the archive");
             continue;
         };
+        let html = super::html::decode_html_to_utf8(&html_bytes);
         let Ok(markdown) = super::html::to_markdown(&html) else {
             warn!("Failed to convert EPUB entry '{entry}' to Markdown, skipping");
             continue;
@@ -92,7 +93,8 @@ fn to_markdown(buffer: &[u8]) -> anyhow::Result<String> {
     Ok(out)
 }
 
-fn read_entry<R>(archive: &mut ZipArchive<R>, name: &str) -> anyhow::Result<String>
+/// Read an archive entry as raw bytes.
+fn read_entry_bytes<R>(archive: &mut ZipArchive<R>, name: &str) -> anyhow::Result<Vec<u8>>
 where
     R: Read + Seek,
 {
@@ -101,6 +103,15 @@ where
         .map_err(|e| anyhow::anyhow!("Entry '{name}' not found in EPUB archive: {e}"))?;
     let mut buf = Vec::new();
     entry.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// Read an archive entry as a UTF-8 string (OPF/container documents are UTF-8 per spec).
+fn read_entry<R>(archive: &mut ZipArchive<R>, name: &str) -> anyhow::Result<String>
+where
+    R: Read + Seek,
+{
+    let buf = read_entry_bytes(archive, name)?;
     Ok(String::from_utf8(buf).unwrap_or_else(|e| {
         // Fall back to lossy decoding for non-UTF-8 entries.
         String::from_utf8_lossy(e.as_bytes()).into_owned()
@@ -259,6 +270,18 @@ mod tests {
         zip.finish().unwrap();
     }
 
+    /// Like `write_zip`, but takes raw bytes so entries can hold non-UTF-8 content.
+    fn write_zip_bytes(path: &Path, entries: &[(&str, Vec<u8>)]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, content) in entries {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(content).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
     fn build_epub(path: &Path) {
         // The spine intentionally lists ch2 before ch1 to verify reading order.
         let opf = r#"<?xml version="1.0"?>
@@ -287,6 +310,46 @@ mod tests {
                 ("OEBPS/Text/ch1.xhtml", ch1),
                 ("OEBPS/Text/ch2.xhtml", ch2),
             ],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_epub_non_utf8_html_entry() {
+        let dir = crate::testutil::unique_temp_dir("epub_test");
+        let path = dir.join("latin1.epub");
+
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+  <metadata>
+    <dc:title>Latin Book</dc:title>
+  </metadata>
+  <manifest>
+    <item id="ch1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="ch1"/>
+  </spine>
+</package>"#;
+
+        // An XHTML entry stored in Windows-1252 (not valid UTF-8).
+        let ch1 = "<html><head><meta charset=\"windows-1252\"/></head><body><p>Caf\u{e9} r\u{e9}sum\u{e9}</p></body></html>";
+        let ch1_bytes = encoding_rs::WINDOWS_1252.encode(ch1).0.into_owned();
+
+        write_zip_bytes(
+            &path,
+            &[
+                ("META-INF/container.xml", CONTAINER.as_bytes().to_vec()),
+                ("OEBPS/content.opf", opf.as_bytes().to_vec()),
+                ("OEBPS/Text/ch1.xhtml", ch1_bytes),
+            ],
+        );
+
+        let data = FileTextData::load(&path).await.unwrap();
+        assert!(matches!(data.format, FileFormat::Epub));
+        assert!(
+            data.text.contains("Caf\u{e9} r\u{e9}sum\u{e9}"),
+            "got: {}",
+            data.text
         );
     }
 
