@@ -12,6 +12,7 @@ mod html;
 mod markdown;
 mod pdf;
 mod python;
+mod rst;
 mod rust;
 mod text;
 
@@ -33,13 +34,14 @@ pub enum FileFormat {
     Epub,
     Python,
     Rust,
+    Rst,
 }
 
 #[derive(Clone)]
 pub struct FileTextData {
     /// Original format of the file.
     pub format: FileFormat,
-    /// Normalized text content — plain text for code, Markdown for HTML/PDF/EPUB/MD.
+    /// Normalized text content — plain text for code, Markdown for HTML/PDF/EPUB/MD/RST.
     /// Shared via `Arc` so cache hits and clones don't copy the text.
     pub text: Arc<String>,
 }
@@ -90,6 +92,7 @@ pub fn file_format_by_file_name(file_path: &Path) -> Option<FileFormat> {
         "htm" | "html" => Some(FileFormat::Html),
         "pdf" => Some(FileFormat::Pdf),
         "epub" => Some(FileFormat::Epub),
+        "rst" | "rest" => Some(FileFormat::Rst),
         _ => None,
     }
 }
@@ -97,7 +100,7 @@ pub fn file_format_by_file_name(file_path: &Path) -> Option<FileFormat> {
 impl FileTextData {
     /// Load file, detect format by extension, normalize content.
     ///
-    /// HTML, PDF and EPUB files are converted to Markdown; all others are read as-is.
+    /// HTML, PDF, EPUB and RST files are converted to Markdown; all others are read as-is.
     async fn load(file_path: &Path) -> anyhow::Result<FileTextData> {
         let format = file_format_by_file_name(file_path)
             .ok_or_else(|| anyhow::anyhow!("Unsupported format"))?;
@@ -105,6 +108,7 @@ impl FileTextData {
             FileFormat::Html => html::load_from_file_and_convert_to_md(file_path).await?,
             FileFormat::Pdf => pdf::load_from_file_and_convert_to_md(file_path).await?,
             FileFormat::Epub => epub::load_from_file_and_convert_to_md(file_path).await?,
+            FileFormat::Rst => rst::load_from_file_and_convert_to_md(file_path).await?,
             _ => text::load_string_from_file(file_path).await?,
         };
         Ok(FileTextData {
@@ -116,9 +120,11 @@ impl FileTextData {
     /// Extract file structure (headings + line count) based on format.
     pub fn structure(&self) -> FileStructure {
         match self.format {
-            FileFormat::Markdown | FileFormat::Html | FileFormat::Pdf | FileFormat::Epub => {
-                markdown::structure(&self.text)
-            }
+            FileFormat::Markdown
+            | FileFormat::Html
+            | FileFormat::Pdf
+            | FileFormat::Epub
+            | FileFormat::Rst => markdown::structure(&self.text),
             FileFormat::Text => text::structure(&self.text),
             FileFormat::Python => python::structure(&self.text),
             FileFormat::Rust => rust::structure(&self.text),
@@ -156,5 +162,28 @@ mod tests {
         // After invalidation fresh content is read from disk.
         let fresh = load_file_text_data(&cache, &file).await.unwrap();
         assert_eq!(fresh.text.as_str(), "version two");
+    }
+
+    #[tokio::test]
+    async fn test_rst_load_and_structure() {
+        let file = make_temp_dir().join("doc.rst");
+        std::fs::write(
+            &file,
+            "Title\n=====\n\nBody text.\n\nSub Section\n-----------\n\nMore text.\n",
+        )
+        .unwrap();
+        let cache = new_text_data_cache();
+
+        let data = load_file_text_data(&cache, &file).await.unwrap();
+        assert!(matches!(data.format, FileFormat::Rst));
+        assert!(data.text.contains("# Title"));
+        assert!(data.text.contains("## Sub Section"));
+
+        let structure = data.structure();
+        assert_eq!(structure.headers.len(), 2);
+        assert_eq!(structure.headers[0].text, "Title");
+        assert_eq!(structure.headers[0].level, 1);
+        assert_eq!(structure.headers[1].text, "Sub Section");
+        assert_eq!(structure.headers[1].level, 2);
     }
 }

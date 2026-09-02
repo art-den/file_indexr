@@ -57,7 +57,7 @@ bind = "127.0.0.1"
 max_file_size_mb = 2
 
 # Only index these extensions. If omitted, only files with a recognized
-# format (txt, md, rs, py, htm, html, pdf, epub) are indexed.
+# format (txt, md, rs, py, htm, html, pdf, epub, rst, rest) are indexed.
 # Case-insensitive; leading dots and surrounding whitespace are tolerated.
 allowed_extensions = ["md", "txt"]
 
@@ -97,7 +97,7 @@ Command-line arguments override config file values.
 | `start_line` | integer | No       | 1-based starting line number.                   |
 | `end_line`   | integer | No       | 1-based ending line number (inclusive).         |
 
-Supported formats for `docs_headings` and `docs_get`: `txt`, `md`, `rs`, `py`, `htm`, `html`, `pdf`, `epub`.
+Supported formats for `docs_headings` and `docs_get`: `txt`, `md`, `rs`, `py`, `htm`, `html`, `pdf`, `epub`, `rst`, `rest`.
 
 ### Web UI
 
@@ -145,10 +145,10 @@ Options:
 ## Notes
 
 - The index lives on disk by default inside the watched directory (`.file_indexr/index/`). You can move it elsewhere with `-i` to keep your project clean or put it on a faster drive.
-- By default only files with a recognized format (`txt`, `md`, `rs`, `py`, `htm`, `html`, `pdf`, `epub`) are indexed — the decision is made by the same format detection used for content extraction; content itself is read from disk on demand (never stored in the index) and within the size limit. To index other extensions, list them in `allowed_extensions`; files without a recognized format then appear in results with `has_content=false`.
+- By default only files with a recognized format (`txt`, `md`, `rs`, `py`, `htm`, `html`, `pdf`, `epub`, `rst`, `rest`) are indexed — the decision is made by the same format detection used for content extraction; content itself is read from disk on demand (never stored in the index) and within the size limit. To index other extensions, list them in `allowed_extensions`; files without a recognized format then appear in results with `has_content=false`.
 - Allowed extensions (via `--allowed-extensions` or `allowed_extensions`) are normalized before use: trimmed, leading dots removed, lowercased, and de-duplicated. So `"md, TXT"`, `".md"`, and `"md"` all match the same files.
 - Large catalogs are supported: startup scan streams events through a bounded channel, deletion detection uses the Tantivy FST term dictionary, and indexing happens in configurable batches.
 - The server listens on `127.0.0.1` by default. Use `-b 0.0.0.0` to expose it on the network.
-- HTML files (`.html`, `.htm`), PDF files (`.pdf`), and EPUB books (`.epub`) are automatically converted to Markdown when served via MCP tools or the web `/file` endpoint.
+- HTML files (`.html`, `.htm`), PDF files (`.pdf`), EPUB books (`.epub`), and reStructuredText files (`.rst`, `.rest`) are automatically converted to Markdown when served via MCP tools or the web `/file` endpoint.
 - Directories starting with `.` are excluded from indexing (dot files at top level are still indexed).
 - The watcher task auto-restarts on failure (up to 7 attempts with exponential backoff). If the watcher exits, the entire server shuts down gracefully.

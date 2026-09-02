@@ -204,6 +204,7 @@ fn content_type_for_format(format: FileFormat) -> &'static str {
         FileFormat::Html
         | FileFormat::Pdf
         | FileFormat::Epub
+        | FileFormat::Rst
         | FileFormat::Markdown => "text/markdown; charset=utf-8",
         FileFormat::Text | FileFormat::Python | FileFormat::Rust => "text/plain; charset=utf-8",
     }
