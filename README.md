@@ -6,7 +6,7 @@ A local file search server that makes your codebase instantly searchable. Built 
 
 ## What problem does it solve
 
-An AI agent in a browser or sandbox can call `fetch()`, but cannot walk your filesystem. FileIndexr bridges that gap: it indexes all files in a directory and exposes an MCP interface so any MCP client can search by filename, path, or file content.
+An AI agent in a browser or sandbox can call `fetch()`, but cannot walk your filesystem. FileIndexr bridges that gap: it indexes the files in a directory and exposes an MCP interface so any MCP client can search by filename, path, or file content.
 
 ## How it works
 
@@ -42,7 +42,7 @@ The binary ends up in `target/release/file_indexr`.
 ./target/release/file_indexr -d /path/to/your/project --stdio
 ```
 
-The first run indexes everything. Subsequent runs only process changes.
+The first run indexes all supported files. Subsequent runs only process changes.
 
 ### Config file (optional)
 
@@ -56,9 +56,10 @@ bind = "127.0.0.1"
 # Only index content for files up to 2 MB
 max_file_size_mb = 2
 
-# Only index these extensions (empty = all files)
-# Case-insensitive; leading dots and surrounding whitespace are tolerated
-allowed_extensions = []
+# Only index these extensions. If omitted, only files with a recognized
+# format (txt, md, rs, py, htm, html, pdf, epub) are indexed.
+# Case-insensitive; leading dots and surrounding whitespace are tolerated.
+allowed_extensions = ["md", "txt"]
 
 # Batch settings for the writer
 batch_size = 500
@@ -135,7 +136,7 @@ Options:
       --max-file-size-mb <MB> Max file size to index content (MB) [default: 20]
       --batch-size <N>       Changes per batch commit [default: 500]
       --batch-timeout-ms <MS> Max wait before committing batch (ms) [default: 1000]
-      --allowed-extensions   Comma-separated list of allowed extensions to index content (e.g., "md,txt,html")
+      --allowed-extensions   Comma-separated list of allowed extensions (e.g., "md,txt,html") [default: supported formats]
       --config <PATH>        Path to config.toml
   -v, --verbose              Enable debug logging
       --stdio                Run MCP over STDIO instead of starting HTTP server
@@ -144,7 +145,7 @@ Options:
 ## Notes
 
 - The index lives on disk by default inside the watched directory (`.file_indexr/index/`). You can move it elsewhere with `-i` to keep your project clean or put it on a faster drive.
-- All files are indexed, but content is read from disk on demand (never stored in the index) for files with a recognized format (`txt`, `md`, `rs`, `py`, `htm`, `html`, `pdf`, `epub`) and within the size limit. Other files appear in results with `has_content=false`.
+- By default only files with a recognized format (`txt`, `md`, `rs`, `py`, `htm`, `html`, `pdf`, `epub`) are indexed — the decision is made by the same format detection used for content extraction; content itself is read from disk on demand (never stored in the index) and within the size limit. To index other extensions, list them in `allowed_extensions`; files without a recognized format then appear in results with `has_content=false`.
 - Allowed extensions (via `--allowed-extensions` or `allowed_extensions`) are normalized before use: trimmed, leading dots removed, lowercased, and de-duplicated. So `"md, TXT"`, `".md"`, and `"md"` all match the same files.
 - Large catalogs are supported: startup scan streams events through a bounded channel, deletion detection uses the Tantivy FST term dictionary, and indexing happens in configurable batches.
 - The server listens on `127.0.0.1` by default. Use `-b 0.0.0.0` to expose it on the network.

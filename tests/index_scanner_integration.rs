@@ -314,9 +314,11 @@ async fn test_scan_includes_dotfiles_but_skips_hidden_dirs() {
     let index_dir = make_temp_dir();
     let config = Arc::new(make_config(&watch_dir, &index_dir));
 
-    // Dot files at top level — should be indexed
-    std::fs::write(watch_dir.join(".env"), "SECRET=val").unwrap();
-    std::fs::write(watch_dir.join(".gitignore"), "*.log").unwrap();
+    // Dot files at top level — should be indexed. Dot files carry a
+    // recognized extension: with the empty default, extensionless files have
+    // no recognizable format and are skipped.
+    std::fs::write(watch_dir.join(".env.txt"), "SECRET=val").unwrap();
+    std::fs::write(watch_dir.join(".gitignore.txt"), "*.log").unwrap();
     std::fs::write(watch_dir.join("normal.txt"), "hello").unwrap();
 
     // Hidden directory — should be skipped
@@ -325,7 +327,7 @@ async fn test_scan_includes_dotfiles_but_skips_hidden_dirs() {
 
     // Normal subdirectory with dotfile — should be indexed
     std::fs::create_dir_all(watch_dir.join("src")).unwrap();
-    std::fs::write(watch_dir.join("src/.env.local"), "DEV=true").unwrap();
+    std::fs::write(watch_dir.join("src/.env.local.txt"), "DEV=true").unwrap();
 
     let writer = Arc::new(
         IndexWriterWrapper::new(
@@ -340,7 +342,7 @@ async fn test_scan_includes_dotfiles_but_skips_hidden_dirs() {
     let (tx, _rx) = mpsc::channel::<FileChange>(100);
 
     let count = scan_directory(&config, writer.index(), tx).await.unwrap();
-    // .env, .gitignore, normal.txt, src/.env.local — 4 files
+    // .env.txt, .gitignore.txt, normal.txt, src/.env.local.txt — 4 files
     assert_eq!(count, 4);
 }
 

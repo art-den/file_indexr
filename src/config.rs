@@ -39,7 +39,8 @@ pub struct Config {
     pub max_file_size_mb: u64,
     pub batch_size: usize,
     pub batch_timeout_ms: u64,
-    /// Allowed extensions for indexing. If empty, all files are indexed.
+    /// Allowed extensions for indexing. If empty, only files with a
+    /// recognized format (`crate::formats::file_format_by_file_name`) are indexed.
     pub allowed_extensions: Vec<String>,
 }
 
@@ -93,7 +94,8 @@ pub struct Args {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
-    /// Comma-separated list of allowed extensions (e.g., "md,txt,html"). If empty, all files are indexed.
+    /// Comma-separated list of allowed extensions (e.g., "md,txt,html").
+    /// If unspecified, only files with a recognized format are indexed.
     #[arg(long, value_delimiter = ',')]
     pub allowed_extensions: Option<Vec<String>>,
 
@@ -258,14 +260,16 @@ impl Config {
         self.max_file_size_mb * 1_000_000
     }
 
-    /// Returns `true` if the file with given extension should be indexed.
-    /// Accepts `Option<&OsStr>` directly from `Path::extension()`.
-    /// If `allowed_extensions` is set, only those are allowed; otherwise all pass through.
-    pub fn should_index_extension(&self, ext: Option<&std::ffi::OsStr>) -> bool {
+    /// Returns `true` if the file at `path` should be indexed.
+    /// If `allowed_extensions` is set, only files with one of those extensions
+    /// pass; otherwise the decision is made by
+    /// [`crate::formats::file_format_by_file_name`] — only files with a
+    /// recognized format are indexed.
+    pub fn should_index(&self, path: &Path) -> bool {
         if self.allowed_extensions.is_empty() {
-            return true;
+            return crate::formats::file_format_by_file_name(path).is_some();
         }
-        let Some(ext) = ext else {
+        let Some(ext) = path.extension() else {
             return false;
         };
         let ext_str = ext.to_string_lossy();
@@ -583,6 +587,20 @@ allowed_extensions = ["md", "txt", "html"]
         assert!(config.allowed_extensions.is_empty());
     }
 
+    #[test]
+    fn test_default_indexes_only_recognized_formats() {
+        let temp_dir = make_temp_dir();
+        let args = make_test_args(Some(temp_dir));
+
+        let (config, _) = merge_config(args, None).unwrap();
+        assert!(config.should_index(Path::new("notes.txt")));
+        assert!(config.should_index(Path::new("doc.PDF")));
+        assert!(config.should_index(Path::new("src/main.rs")));
+        assert!(!config.should_index(Path::new("data.bin")));
+        assert!(!config.should_index(Path::new("lib.so")));
+        assert!(!config.should_index(Path::new("noextension")));
+    }
+
     #[tokio::test]
     async fn test_allowed_extensions_from_config_are_normalized() {
         let temp_dir = make_temp_dir();
@@ -644,7 +662,7 @@ allowed_extensions = [".md", " TXT", "md"]
     }
 
     #[test]
-    fn test_normalized_extensions_match_should_index_extension() {
+    fn test_normalized_extensions_match_should_index() {
         // Pins the user-visible effect: malformed entries (leading dot, leading
         // whitespace) are normalized so they actually match real file extensions.
         let temp_dir = make_temp_dir();
@@ -652,11 +670,11 @@ allowed_extensions = [".md", " TXT", "md"]
         args.allowed_extensions = Some(vec![".md".to_string(), " txt".to_string()]);
 
         let (config, _) = merge_config(args, None).unwrap();
-        assert!(config.should_index_extension(Some(std::ffi::OsStr::new("md"))));
-        assert!(config.should_index_extension(Some(std::ffi::OsStr::new("MD"))));
-        assert!(config.should_index_extension(Some(std::ffi::OsStr::new("txt"))));
-        assert!(!config.should_index_extension(Some(std::ffi::OsStr::new("html"))));
-        assert!(!config.should_index_extension(None));
+        assert!(config.should_index(Path::new("a.md")));
+        assert!(config.should_index(Path::new("a.MD")));
+        assert!(config.should_index(Path::new("b.txt")));
+        assert!(!config.should_index(Path::new("c.html")));
+        assert!(!config.should_index(Path::new("noext")));
     }
 
     #[tokio::test]

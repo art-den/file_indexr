@@ -321,12 +321,13 @@ impl IndexWriterWrapper {
     }
 
     /// Add a file to the index by reading from disk.
-    /// Returns Ok(()) if the file was indexed, or Ok(()) if it was skipped due to extension filter.
+    /// Returns Ok(()) if the file was indexed, or Ok(()) if it was skipped as
+    /// non-indexable (`Config::should_index`: extension filter or unrecognized format).
     /// Deletes any existing document with the same path first to avoid duplicates.
     /// Returns an error if the path is outside the watched directory or contains invalid UTF-8.
     pub async fn add_file(&self, path: PathBuf) -> Result<()> {
-        // Fast-path: reject by extension without touching the filesystem.
-        if !self.config.should_index_extension(path.extension()) {
+        // Fast-path: reject non-indexable files without touching the filesystem.
+        if !self.config.should_index(&path) {
             return Ok(());
         }
 

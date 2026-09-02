@@ -238,7 +238,7 @@ async fn walk_directory(
             warn!(path = %p.display(), "Skipping file with non-UTF8 path");
             continue;
         }
-        if !config.should_index_extension(p.extension()) {
+        if !config.should_index(&p) {
             continue;
         }
 

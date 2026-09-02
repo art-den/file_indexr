@@ -745,7 +745,15 @@ mod tests {
     async fn test_search_extension_case_insensitive() {
         let watch_dir = make_temp_dir();
         let index_dir = make_temp_dir();
-        let config = make_config(&watch_dir, index_dir);
+        // PNG/JPG are not recognized formats: an empty allow-list would skip
+        // them, so index them via an explicit extension list.
+        let mut config = (*make_config(&watch_dir, index_dir)).clone();
+        config.allowed_extensions = vec![
+            "png".to_string(),
+            "jpg".to_string(),
+            "rs".to_string(),
+        ];
+        let config = Arc::new(config);
 
         // Create files with mixed-case extensions
         std::fs::write(watch_dir.join("photo.PNG"), "image data").unwrap();
