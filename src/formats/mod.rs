@@ -102,9 +102,9 @@ impl FileTextData {
         let format = file_format_by_file_name(file_path)
             .ok_or_else(|| anyhow::anyhow!("Unsupported format"))?;
         let text = match format {
-            FileFormat::Html => html::load_string_from_file(file_path).await?,
-            FileFormat::Pdf => pdf::load_string_from_file(file_path).await?,
-            FileFormat::Epub => epub::load_string_from_file(file_path).await?,
+            FileFormat::Html => html::load_from_file_and_convert_to_md(file_path).await?,
+            FileFormat::Pdf => pdf::load_from_file_and_convert_to_md(file_path).await?,
+            FileFormat::Epub => epub::load_from_file_and_convert_to_md(file_path).await?,
             _ => text::load_string_from_file(file_path).await?,
         };
         Ok(FileTextData {

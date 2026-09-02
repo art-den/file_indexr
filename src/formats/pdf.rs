@@ -1,7 +1,7 @@
 use std::path::Path;
 
 /// Load PDF file and convert to Markdown.
-pub async fn load_string_from_file(file_path: &Path) -> anyhow::Result<String> {
+pub async fn load_from_file_and_convert_to_md(file_path: &Path) -> anyhow::Result<String> {
     let path = file_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let options = unpdf::RenderOptions::new()
