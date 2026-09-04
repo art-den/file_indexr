@@ -25,7 +25,10 @@ pub fn structure(text: &str) -> FileStructure {
 
         if let Some((kind, depth, name)) = try_parse_python_heading(line) {
             // Drop entries at the same or deeper indent (sibling or closed block).
-            stack.retain(|&(d, _)| d < depth);
+            // Stack depths are strictly increasing, so only the tail can qualify.
+            while stack.last().is_some_and(|&(d, _)| d >= depth) {
+                stack.pop();
+            }
 
             let level = match kind {
                 HeadingKind::Class => (stack.len() + 1) as u8,
@@ -79,12 +82,9 @@ fn try_parse_python_heading(line: &str) -> Option<(HeadingKind, u8, String)> {
 
 /// Normalize heading text: strip comment, parameters, and trailing colon for display.
 fn normalize_heading_text(text: &str) -> Option<String> {
-    let text = text
-        .split_once('#')
-        .map_or(text, |(before, _)| before)
-        .trim();
-    let text = text.split_once('(').map_or(text, |(before, _)| before);
-    let text = text.trim_end_matches([':', ' ', '\t']);
+    // Cut at the first `#` (comment) or `(` (params), whichever comes first.
+    let cut = text.find(['#', '(']).unwrap_or(text.len());
+    let text = text[..cut].trim_start().trim_end_matches([':', ' ', '\t']);
     (!text.is_empty()).then(|| text.to_string())
 }
 

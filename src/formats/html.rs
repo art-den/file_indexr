@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -31,27 +32,26 @@ pub(crate) fn to_markdown(html: &str) -> anyhow::Result<String> {
         extract_metadata: false,
         ..ConversionOptions::default()
     };
-    Ok(html_to_markdown_rs::convert(html, Some(options))?
-        .content
-        .unwrap_or_default())
+    Ok(html_to_markdown_rs::convert(html, options)?.content.unwrap_or_default())
 }
 
-/// Decode raw HTML bytes into a UTF-8 `String`.
+/// Decode raw HTML bytes into UTF-8, borrowing from `bytes` when it is already
+/// valid UTF-8 to avoid a copy.
 ///
 /// HTML is not guaranteed to be UTF-8, so we:
 /// 1. take a fast path when the buffer is already valid UTF-8,
 /// 2. otherwise honor a byte-order mark or an inline `<meta>` charset declaration,
 /// 3. otherwise fall back to Windows-1252, the WHATWG default and the most common
 ///    non-UTF-8 encoding for real-world HTML.
-pub(crate) fn decode_html_to_utf8(bytes: &[u8]) -> String {
+pub(crate) fn decode_html_to_utf8(bytes: &[u8]) -> Cow<'_, str> {
     // Fast path: already valid UTF-8.
     if let Ok(text) = std::str::from_utf8(bytes) {
-        return text.to_string();
+        return Cow::Borrowed(text);
     }
 
     let (encoding, payload) = detect_encoding(bytes);
     let (cow, _, _) = encoding.decode(payload);
-    cow.into_owned()
+    cow
 }
 
 /// Resolve the encoding for a non-UTF-8 buffer and the byte slice to decode.

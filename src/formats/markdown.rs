@@ -20,24 +20,17 @@ pub fn structure(text: &str) -> FileStructure {
             raw_headings.push((total_lines, level, h_text.to_string()));
         }
     }
-    let headers = build_heading_items(raw_headings, total_lines);
 
     FileStructure {
-        headers,
+        headers: build_heading_items(raw_headings, total_lines),
         total_lines,
     }
 }
 
 fn try_parse_atx_heading(line: &str) -> Option<(u8, &str)> {
     let level = usize::min(line.bytes().take_while(|&b| b == b'#').count(), 6);
-    if level == 0 {
-        return None;
-    }
     let text = line[level..].trim();
-    if text.is_empty() {
-        return None;
-    }
-    Some((level as u8, text))
+    (level > 0 && !text.is_empty()).then_some((level as u8, text))
 }
 
 pub fn build_heading_items(

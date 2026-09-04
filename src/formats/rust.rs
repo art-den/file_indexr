@@ -117,25 +117,25 @@ pub fn structure(text: &str) -> FileStructure {
 /// misread as an unterminated char literal for the rest of the line.
 ///
 /// Line-scoped by design: raw strings `r#"..."#` are not tracked across lines.
-fn count_brace_delta(line: &str, mut in_block_comment: bool) -> (isize, bool) {
+fn count_brace_delta(line: &str, in_block_comment: bool) -> (isize, bool) {
     let mut delta: isize = 0;
     // Closing quote of the string/char literal being scanned, if any.
     let mut quote: Option<u8> = None;
     let mut escaped = false;
     let chars = line.as_bytes();
-    let mut i = 0;
+    // A block comment started on an earlier line: resume after its `*/`, or
+    // bail out if the rest of the line is still comment.
+    let mut i = if in_block_comment {
+        match line.find("*/") {
+            Some(end) => end + 2,
+            None => return (0, true),
+        }
+    } else {
+        0
+    };
 
     while i < chars.len() {
         let ch = chars[i];
-        if in_block_comment {
-            if ch == b'*' && i + 1 < chars.len() && chars[i + 1] == b'/' {
-                in_block_comment = false;
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
         if let Some(close) = quote {
             if escaped {
                 escaped = false;
@@ -152,9 +152,13 @@ fn count_brace_delta(line: &str, mut in_block_comment: bool) -> (isize, bool) {
             match chars[i + 1] {
                 // `//` comments run to end of line — nothing left to count.
                 b'/' => break,
+                // Block comment: jump straight to its closing `*/`.
                 b'*' => {
-                    in_block_comment = true;
                     i += 2;
+                    match line[i..].find("*/") {
+                        Some(end) => i += end + 2,
+                        None => return (delta, true),
+                    }
                     continue;
                 }
                 _ => {}
@@ -194,7 +198,7 @@ fn count_brace_delta(line: &str, mut in_block_comment: bool) -> (isize, bool) {
         }
         i += 1;
     }
-    (delta, in_block_comment)
+    (delta, false)
 }
 
 /// Compute heading level based on stack context and item kind.
@@ -225,12 +229,7 @@ fn compute_level(stack: &[StackEntry], kind: ItemKind) -> u8 {
 }
 
 /// Normalize heading text: strip braces, `//` comments, trailing params for display.
-fn normalize_heading_text(kind: ItemKind, text: &str) -> String {
-    if kind == ItemKind::Imp {
-        // Keep impl line as-is — it's descriptive enough.
-        return text.to_string();
-    }
-
+fn normalize_heading_text(text: &str) -> String {
     // Drop param lists (everything after `(`, keeping generics) and `//` comments.
     let text = text.split_once('(').map_or(text, |(before, _)| before);
     let text = text.split_once("//").map_or(text, |(before, _)| before);
@@ -281,16 +280,13 @@ fn try_parse_rust_item(line: &str) -> Option<(ItemKind, String)> {
         if let Some(rest) = stripped.strip_prefix(prefix) {
             // `rest` is a suffix of the trimmed, normalised line, so it is
             // non-empty and free of surrounding whitespace.
-            return Some((kind, normalize_heading_text(kind, rest)));
+            return Some((kind, normalize_heading_text(rest)));
         }
     }
 
-    // `impl` — bare, followed by `<` or ` `.
+    // `impl` — bare, followed by `<` or ` `. Kept as-is, it's descriptive enough.
     if stripped == "impl" || stripped.starts_with("impl<") || stripped.starts_with("impl ") {
-        return Some((
-            ItemKind::Imp,
-            normalize_heading_text(ItemKind::Imp, stripped),
-        ));
+        return Some((ItemKind::Imp, stripped.to_string()));
     }
 
     None

@@ -28,15 +28,19 @@ struct OpfPatterns {
     item: Regex,
     itemref: Regex,
     title: Regex,
-    tag: Regex,
 }
 
 static OPF_PATTERNS: LazyLock<OpfPatterns> = LazyLock::new(|| OpfPatterns {
     item: Regex::new(r"<item\b[^>]*/?>").unwrap(),
     itemref: Regex::new(r"<itemref\b[^>]*/?>").unwrap(),
     title: Regex::new(r"<(?:[\w-]+:)?title[^>]*>(.*?)</(?:[\w-]+:)?title>").unwrap(),
-    tag: Regex::new(r"<[^>]+>").unwrap(),
 });
+
+/// Strips XML tags and decodes the five predefined XML entities in a single
+/// left-to-right pass; tags are replaced with a space so adjacent words stay
+/// separated.
+static TITLE_CLEANUP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<[^>]+>|&lt;|&gt;|&quot;|&apos;|&amp;").unwrap());
 
 /// Load EPUB file and convert to Markdown.
 pub async fn load_from_file_and_convert_to_md(file_path: &Path) -> anyhow::Result<String> {
@@ -59,8 +63,7 @@ fn to_markdown(buffer: &[u8]) -> anyhow::Result<String> {
     let (manifest, spine) = parse_opf(&opf)?;
     let opf_dir = Path::new(&opf_path)
         .parent()
-        .map(Path::to_string_lossy)
-        .map(|s| s.into_owned())
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     let mut out = String::new();
@@ -121,7 +124,7 @@ where
 /// `full-path` attribute of the `<rootfile>` element in `META-INF/container.xml`.
 fn container_rootfile(xml: &str) -> anyhow::Result<String> {
     let tag = find_element_tag(xml, "rootfile")?;
-    attr(&tag, "full-path").ok_or_else(|| anyhow::anyhow!("No full-path attribute in <rootfile>"))
+    attr(tag, "full-path").ok_or_else(|| anyhow::anyhow!("No full-path attribute in <rootfile>"))
 }
 
 /// Parse the OPF package file into manifest items keyed by id and the spine reading order.
@@ -155,9 +158,18 @@ fn parse_opf(xml: &str) -> anyhow::Result<(HashMap<String, OpfItem>, Vec<String>
 
 /// Book title from the OPF `<metadata>` element, if present.
 fn parse_title(opf: &str) -> Option<String> {
-    let inner = OPF_PATTERNS.title.captures(opf)?.get(1)?.as_str();
-    let unescaped = unescape_xml(&OPF_PATTERNS.tag.replace_all(inner, " "));
-    let text = unescaped.split_whitespace().collect::<Vec<_>>().join(" ");
+    let inner = OPF_PATTERNS.title.captures(opf)?.get(1)?;
+    let cleaned = TITLE_CLEANUP.replace_all(inner.as_str(), |c: &regex::Captures| {
+        match c.get(0).unwrap().as_str() {
+            "&lt;" => "<",
+            "&gt;" => ">",
+            "&quot;" => "\"",
+            "&apos;" => "'",
+            "&amp;" => "&",
+            _ => " ", // XML tag
+        }
+    });
+    let text = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     (!text.is_empty()).then_some(text)
 }
 
@@ -173,9 +185,8 @@ struct OpfItem {
 fn resolve_entry_path(opf_dir: &str, href: &str) -> String {
     let href = href.split('#').next().unwrap();
     if let Some(absolute) = href.strip_prefix('/') {
-        return absolute.to_string();
-    }
-    if opf_dir.is_empty() {
+        absolute.to_string()
+    } else if opf_dir.is_empty() {
         href.to_string()
     } else {
         format!("{opf_dir}/{href}")
@@ -202,13 +213,12 @@ fn find_element_open(xml: &str, tag: &str) -> anyhow::Result<usize> {
 }
 
 /// The first opening tag for `tag`, e.g. `<item id="a" ... />`.
-fn find_element_tag(xml: &str, tag: &str) -> anyhow::Result<String> {
+fn find_element_tag<'a>(xml: &'a str, tag: &str) -> anyhow::Result<&'a str> {
     let open = find_element_open(xml, tag)?;
-    let tag_text = &xml[open..];
-    let end = tag_text
+    let end = xml[open..]
         .find('>')
         .ok_or_else(|| anyhow::anyhow!("Unclosed <{tag}> tag in package metadata"))?;
-    Ok(tag_text[..end + 1].to_string())
+    Ok(&xml[open..open + end + 1])
 }
 
 /// The opening tag and inner content of the first `<tag>...</tag>` element

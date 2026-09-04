@@ -62,10 +62,10 @@ pub fn to_markdown(rst: &str) -> String {
         }
 
         // Section title: overlined (overline + text + underline) form.
-        if let Some((ch, _)) = punct(line) {
+        if let Some(ch) = punct(line) {
             if i + 2 < lines.len()
                 && !lines[i + 1].trim().is_empty()
-                && matches!(punct(lines[i + 2]), Some((c, _)) if c == ch)
+                && punct(lines[i + 2]) == Some(ch)
             {
                 emit_title(&mut out, lines[i + 1].trim(), ch, &mut section_levels);
                 i += 3;
@@ -79,7 +79,7 @@ pub fn to_markdown(rst: &str) -> String {
 
         // Section title: underlined form (text + underline).
         if !is_indented(line) && i + 1 < lines.len() {
-            if let Some((ch, _)) = punct(lines[i + 1]) {
+            if let Some(ch) = punct(lines[i + 1]) {
                 emit_title(&mut out, line.trim(), ch, &mut section_levels);
                 i += 2;
                 continue;
@@ -234,19 +234,16 @@ fn emit_code_fence(out: &mut Vec<String>, lang: &str, block: &[String]) {
 
 /// Strip the common leading indentation from a block of lines.
 fn dedent(block: &[&str]) -> Vec<String> {
+    let lead_ws = |l: &&str| l.len() - l.trim_start_matches([' ', '\t']).len();
     let min = block
         .iter()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start_matches([' ', '\t']).len())
+        .map(lead_ws)
         .min()
         .unwrap_or(0);
     block
         .iter()
-        .map(|l| {
-            let lead = l.len() - l.trim_start_matches([' ', '\t']).len();
-            let skip = min.min(lead);
-            l[skip..].to_string()
-        })
+        .map(|l| l[usize::min(min, lead_ws(l))..].to_string())
         .collect()
 }
 
@@ -259,12 +256,12 @@ fn emit_title(out: &mut Vec<String>, text: &str, ch: char, levels: &mut Vec<char
             levels.len()
         }
     };
-    let hashes: String = std::iter::repeat_n('#', usize::min(level, 6)).collect();
+    let hashes = "#".repeat(usize::min(level, 6));
     out.push(format!("{} {}", hashes, convert_inline(text.trim())));
 }
 
-/// Return (char, length) if `line` is an unindented run of a single underline char.
-fn punct(line: &str) -> Option<(char, usize)> {
+/// Return `Some(ch)` if `line` is an unindented run of a single underline char.
+fn punct(line: &str) -> Option<char> {
     if is_indented(line) {
         return None;
     }
@@ -277,7 +274,7 @@ fn punct(line: &str) -> Option<(char, usize)> {
     if chars.any(|c| c != first) {
         return None;
     }
-    Some((first, t.len()))
+    Some(first)
 }
 
 /// Parse a bullet or enumerated list item. Returns (is_ordered, number, content).
@@ -292,19 +289,17 @@ fn parse_list_item(line: &str) -> Option<(bool, usize, &str)> {
 
     let mut chars = t.chars().peekable();
     match chars.peek() {
+        // Digits and the terminator are ASCII, so all offsets below are in bytes.
         Some(c) if c.is_ascii_digit() => {
-            let digit_count = t.chars().take_while(|c| c.is_ascii_digit()).count();
-            // Digits and the terminator are ASCII, so the content starts at
-            // byte offset `digit_count + 1` (the terminator is a single byte).
-            if matches!(t.chars().nth(digit_count), Some('.') | Some(')')) {
-                let rest = &t[digit_count + 1..];
+            let bytes = t.as_bytes();
+            let end = bytes
+                .iter()
+                .position(|b| !b.is_ascii_digit())
+                .unwrap_or(bytes.len());
+            if matches!(bytes.get(end), Some(b'.') | Some(b')')) {
+                let rest = &t[end + 1..];
                 if rest.starts_with(' ') || rest.starts_with('\t') {
-                    let num: usize = t
-                        .chars()
-                        .take(digit_count)
-                        .collect::<String>()
-                        .parse()
-                        .unwrap_or(1);
+                    let num: usize = t[..end].parse().unwrap_or(1);
                     return Some((true, num, rest));
                 }
             }
