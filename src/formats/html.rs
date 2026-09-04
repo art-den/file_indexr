@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::LazyLock;
 
+use html_to_markdown_rs::ConversionOptions;
 use regex::bytes::Regex;
 
 /// Maximum number of leading bytes inspected when sniffing a declared charset,
@@ -26,7 +27,11 @@ pub async fn load_from_file_and_convert_to_md(file_name: &Path) -> anyhow::Resul
 
 /// Convert an HTML document to Markdown.
 pub(crate) fn to_markdown(html: &str) -> anyhow::Result<String> {
-    Ok(html_to_markdown_rs::convert(html, None)?
+    let options = ConversionOptions {
+        extract_metadata: false,
+        ..ConversionOptions::default()
+    };
+    Ok(html_to_markdown_rs::convert(html, Some(options))?
         .content
         .unwrap_or_default())
 }
