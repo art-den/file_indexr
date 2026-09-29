@@ -15,11 +15,11 @@ use crate::index::writer::IndexWriterWrapper;
 /// Maximum number of watcher start attempts before giving up.
 const MAX_WATCHER_RETRIES: u32 = 7;
 /// Upper bound for the exponential backoff between watcher restarts.
-const MAX_WATCHER_RETRY_DELAY_SECS: u64 = 300;
+pub (super) const MAX_WATCHER_RETRY_DELAY_SECS: u64 = 300;
 
 /// Backoff delay before the given (1-based) watcher start attempt:
 /// `5 << (attempt - 1)` seconds, capped at `MAX_WATCHER_RETRY_DELAY_SECS`.
-fn backoff_delay(attempt: u32) -> Duration {
+pub (super) fn backoff_delay(attempt: u32) -> Duration {
     // 5 << 6 = 320 s already exceeds the cap, so any larger shift can only
     // produce the capped value.
     let shift = u32::min(u32::saturating_sub(attempt, 1), 6);
@@ -88,37 +88,4 @@ pub async fn run_with_backoff(
         }
     }
     let _ = done_tx.send(true);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_backoff_delay_sequence() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(5));
-        assert_eq!(backoff_delay(2), Duration::from_secs(10));
-        assert_eq!(backoff_delay(3), Duration::from_secs(20));
-        // The 7th failure gives up without sleeping, but the cap branch of
-        // the pure function is exercised by the attempt-7 value.
-        assert_eq!(
-            backoff_delay(7),
-            Duration::from_secs(MAX_WATCHER_RETRY_DELAY_SECS)
-        );
-        assert_eq!(
-            backoff_delay(100),
-            Duration::from_secs(MAX_WATCHER_RETRY_DELAY_SECS)
-        );
-
-        // The sequence must be non-decreasing.
-        let mut previous = backoff_delay(1);
-        for attempt in 2..=100 {
-            let current = backoff_delay(attempt);
-            assert!(
-                current >= previous,
-                "backoff decreased at attempt {attempt}"
-            );
-            previous = current;
-        }
-    }
 }

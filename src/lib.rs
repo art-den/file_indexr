@@ -30,3 +30,6 @@ pub mod testutil;
 pub mod utils;
 pub mod watch;
 pub mod web;
+
+#[cfg(test)]
+mod tests;

@@ -14,7 +14,7 @@ use crate::index::checkpoint::load_checkpoint;
 
 /// Decode a term key from Tantivy's FST for a STRING field.
 /// The FST key stores raw UTF-8 bytes without a type tag prefix.
-fn decode_term_key(key: &[u8]) -> Option<&str> {
+pub(super) fn decode_term_key(key: &[u8]) -> Option<&str> {
     if key.is_empty() {
         return None;
     }
@@ -22,7 +22,7 @@ fn decode_term_key(key: &[u8]) -> Option<&str> {
 }
 
 /// Resolve the `path_exact` field from the schema.
-fn resolve_path_field(schema: &Schema) -> Result<Field> {
+pub(super) fn resolve_path_field(schema: &Schema) -> Result<Field> {
     schema
         .get_field(crate::schema::field::PATH_EXACT)
         .map_err(|e| anyhow::anyhow!("path_exact field not found in schema: {}", e))
@@ -52,7 +52,7 @@ fn path_in_segment(segment: &SegmentReader, field: Field, rel_path: &str) -> Res
 }
 
 /// Check if a relative path exists in any segment of the index.
-fn path_exists_in_index(segments: &[SegmentReader], field: Field, rel_path: &str) -> Result<bool> {
+pub(super) fn path_exists_in_index(segments: &[SegmentReader], field: Field, rel_path: &str) -> Result<bool> {
     for segment in segments {
         if path_in_segment(segment, field, rel_path)? {
             return Ok(true);
@@ -72,7 +72,7 @@ fn path_exists_in_index(segments: &[SegmentReader], field: Field, rel_path: &str
 /// terms of deleted docs (no alive-bitset filtering, unlike
 /// [`path_in_segment`]) — harmless: emitting `Deleted` for an already
 /// removed path is an idempotent no-op.
-fn detect_deletions_from_index(
+pub(super) fn detect_deletions_from_index(
     segments: &[SegmentReader],
     field: Field,
     directory: &Path,
@@ -158,7 +158,7 @@ async fn needs_indexing(
 /// A `read_dir` failure at any recursion level returns `Err` and fails the
 /// whole scan: an unreadable directory must not look like an empty one, the
 /// checkpoint advancement logic relies on this.
-async fn walk_directory(
+pub(super) async fn walk_directory(
     dir: &Path,
     base_canonical: &Path,
     config: &Config,
@@ -365,204 +365,4 @@ pub fn is_hidden_dir_name(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.starts_with('.'))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::testutil::{unique_temp_dir, unique_temp_path};
-
-    /// Heap budget (bytes) for the test `IndexWriter`s.
-    const TEST_WRITER_HEAP: usize = 50_000_000;
-
-    /// In-memory index with the production schema and the resolved `path_exact` field.
-    fn temp_index() -> (Index, Field) {
-        use tantivy::directory::RamDirectory;
-
-        let schema = crate::schema::build_schema();
-        let index = Index::open_or_create(RamDirectory::default(), schema).unwrap();
-        let field = resolve_path_field(&index.schema()).unwrap();
-        (index, field)
-    }
-
-    #[test]
-    fn test_has_hidden_component() {
-        let base = Path::new("/home/user/project");
-
-        // Hidden directory in path
-        assert!(has_hidden_component(
-            Path::new("/home/user/project/.git/config"),
-            base
-        ));
-        assert!(has_hidden_component(
-            Path::new("/home/user/project/src/.hidden/file.rs"),
-            base
-        ));
-
-        // Normal paths
-        assert!(!has_hidden_component(
-            Path::new("/home/user/project/src/main.rs"),
-            base
-        ));
-        assert!(!has_hidden_component(
-            Path::new("/home/user/project/README.md"),
-            base
-        ));
-
-        // Dot files at top level are NOT hidden (only dirs matter)
-        assert!(!has_hidden_component(
-            Path::new("/home/user/project/.env"),
-            base
-        ));
-
-        // Outside base — should return false (not applicable)
-        assert!(!has_hidden_component(Path::new("/tmp/.secret"), base));
-    }
-
-    #[test]
-    fn test_decode_term_key() {
-        // FST keys are raw UTF-8, no type prefix
-        assert_eq!(decode_term_key(b"a.txt"), Some("a.txt"));
-        assert_eq!(decode_term_key(b"src/main.rs"), Some("src/main.rs"));
-
-        // Invalid: empty key
-        assert!(decode_term_key(&[]).is_none());
-
-        // Invalid: non-UTF-8 bytes
-        assert!(decode_term_key(&[0xFF, 0xFE]).is_none());
-    }
-
-    #[test]
-    fn test_path_in_segment_ignores_deleted_docs() {
-        let (index, field) = temp_index();
-
-        // Index a doc for "a.txt"
-        {
-            let mut writer = index
-                .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
-                .unwrap();
-            let doc = tantivy::doc! { field => "a.txt" };
-            writer.add_document(doc).unwrap();
-            writer.commit().unwrap();
-        }
-
-        let reader = index.reader().unwrap();
-        let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
-        assert!(path_exists_in_index(&segments, field, "a.txt").unwrap());
-        assert!(!path_exists_in_index(&segments, field, "b.txt").unwrap());
-
-        // Delete the doc: the FST keeps the phantom term, only the alive
-        // bitset marks the doc as deleted.
-        {
-            let mut writer = index
-                .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
-                .unwrap();
-            writer.delete_term(Term::from_field_text(field, "a.txt"));
-            writer.commit().unwrap();
-        }
-
-        let reader = index.reader().unwrap();
-        let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
-        // The phantom term must NOT count as indexed.
-        assert!(!path_exists_in_index(&segments, field, "a.txt").unwrap());
-
-        // Re-adding the path (new doc in a new segment) must be found again.
-        {
-            let mut writer = index
-                .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
-                .unwrap();
-            let doc = tantivy::doc! { field => "a.txt" };
-            writer.add_document(doc).unwrap();
-            writer.commit().unwrap();
-        }
-
-        let reader = index.reader().unwrap();
-        let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
-        assert!(path_exists_in_index(&segments, field, "a.txt").unwrap());
-    }
-
-    #[test]
-    fn test_detect_deletions_from_index_reports_missing_files() {
-        let (index, field) = temp_index();
-
-        {
-            let mut writer = index
-                .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
-                .unwrap();
-            writer
-                .add_document(tantivy::doc! { field => "gone.txt" })
-                .unwrap();
-            writer
-                .add_document(tantivy::doc! { field => "present.txt" })
-                .unwrap();
-            writer.commit().unwrap();
-        }
-
-        let reader = index.reader().unwrap();
-        let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
-
-        let dir = unique_temp_dir("detect_del");
-        std::fs::write(dir.join("present.txt"), "hello").unwrap();
-
-        let deleted = detect_deletions_from_index(&segments, field, &dir).unwrap();
-        assert_eq!(deleted, vec![dir.join("gone.txt")]);
-    }
-
-    #[test]
-    fn test_detect_deletions_from_index_ignores_phantom_terms() {
-        let (index, field) = temp_index();
-
-        // Index then delete "a.txt": the FST keeps the phantom term.
-        {
-            let mut writer = index
-                .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
-                .unwrap();
-            writer
-                .add_document(tantivy::doc! { field => "a.txt" })
-                .unwrap();
-            writer.commit().unwrap();
-        }
-        {
-            let mut writer = index
-                .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
-                .unwrap();
-            writer.delete_term(Term::from_field_text(field, "a.txt"));
-            writer.commit().unwrap();
-        }
-
-        let reader = index.reader().unwrap();
-        let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
-
-        // The term is a phantom (doc deleted), but the file exists on disk —
-        // it must NOT be reported as deleted.
-        let dir = unique_temp_dir("detect_del_phantom");
-        std::fs::write(dir.join("a.txt"), "hello").unwrap();
-        let deleted = detect_deletions_from_index(&segments, field, &dir).unwrap();
-        assert!(deleted.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_walk_directory_fails_on_missing_directory() {
-        let (index, field) = temp_index();
-        let reader = index.reader().unwrap();
-        let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
-
-        let config = Config {
-            directory: std::path::PathBuf::new(),
-            index_path: std::path::PathBuf::new(),
-            port: 0,
-            bind: "127.0.0.1".to_string(),
-            max_file_size_mb: 1,
-            batch_size: 500,
-            batch_timeout_ms: 1000,
-            allowed_extensions: vec![],
-        };
-
-        // A nonexistent directory must fail the walk: "unreadable" has to be
-        // distinguishable from "empty" for the checkpoint logic.
-        let missing = unique_temp_path("walk_missing");
-        let (tx, _rx) = mpsc::channel::<FileChange>(16);
-        let result = walk_directory(&missing, &missing, &config, &segments, field, None, &tx).await;
-        assert!(result.is_err());
-    }
 }

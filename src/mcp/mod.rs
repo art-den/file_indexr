@@ -8,6 +8,9 @@ pub mod jsonrpc;
 pub mod stdio;
 pub mod tools;
 
+#[cfg(test)]
+mod tests;
+
 use std::borrow::Cow;
 
 use axum::Json;

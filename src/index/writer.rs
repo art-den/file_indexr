@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::schema;
 
 /// Convert chrono DateTime to tantivy's DateTime (OffsetDateTime).
-fn chrono_to_tantivy(dt: chrono::DateTime<chrono::Utc>) -> tantivy::DateTime {
+pub (super) fn chrono_to_tantivy(dt: chrono::DateTime<chrono::Utc>) -> tantivy::DateTime {
     tantivy::DateTime::from_timestamp_secs(dt.timestamp())
 }
 
@@ -162,22 +162,22 @@ impl DocumentModel {
 
 /// Buffered change pending commit.
 #[derive(Debug)]
-enum Change {
+pub (super) enum Change {
     Add(Document),
     Delete(String),    // exact relative path for deletion
     DeleteDir(String), // prefix — delete all docs whose path starts with this
 }
 
 /// Maximum number of failed commit attempts before a change is dropped.
-const MAX_RETRY_COUNT: usize = 2;
+pub (super) const MAX_RETRY_COUNT: usize = 2;
 
 /// A buffered change awaiting commit. Retried on failure up to a max attempt limit.
 #[derive(Debug)]
-struct ChangeItem {
+pub (super) struct ChangeItem {
     /// The actual operation to apply.
-    data: Change,
+    pub (super) data: Change,
     /// Number of failed attempts. Incremented on each retry; dropped when >= MAX_RETRY_COUNT.
-    try_count: usize,
+    pub (super) try_count: usize,
 }
 
 impl ChangeItem {
@@ -188,7 +188,7 @@ impl ChangeItem {
 
 /// Increment `try_count` on each failed item and drop those that reached
 /// `MAX_RETRY_COUNT`. Returns the survivors to be requeued in the buffer.
-fn requeue_failed(mut failed: Vec<ChangeItem>) -> Vec<ChangeItem> {
+pub (super) fn requeue_failed(mut failed: Vec<ChangeItem>) -> Vec<ChangeItem> {
     failed.retain_mut(|change| {
         change.try_count += 1;
         if change.try_count >= MAX_RETRY_COUNT {
@@ -222,7 +222,7 @@ pub struct IndexWriterWrapper {
     /// Test seam: makes the next commit's blocking task panic, to exercise
     /// the JoinError batch-recovery path.
     #[cfg(test)]
-    panic_on_commit: Arc<AtomicBool>,
+    pub (super) panic_on_commit: Arc<AtomicBool>,
 }
 
 impl IndexWriterWrapper {
@@ -559,138 +559,5 @@ impl IndexWriterWrapper {
         self.reader.reload()?;
         let searcher = self.reader.searcher();
         Ok(searcher.num_docs())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_test_temp_dir(kind: &str) -> PathBuf {
-        crate::testutil::unique_temp_dir(&format!("unit_test_{kind}"))
-    }
-
-    fn make_test_config(watch_dir: &Path, index_dir: &Path) -> Config {
-        Config {
-            directory: watch_dir.to_path_buf(),
-            index_path: index_dir.to_path_buf(),
-            port: 8080,
-            bind: "127.0.0.1".to_string(),
-            max_file_size_mb: 2,
-            batch_size: 500,
-            batch_timeout_ms: 1000,
-            allowed_extensions: vec![],
-        }
-    }
-
-    /// Create three files in `watch_dir` and buffer them for indexing
-    /// (each adds a Delete+Add pair, so 6 buffered items total).
-    async fn buffer_three_files(writer: &IndexWriterWrapper, watch_dir: &Path) {
-        for name in ["a.txt", "b.txt", "c.txt"] {
-            let path = watch_dir.join(name);
-            std::fs::write(&path, "content").unwrap();
-            writer.add_file(path).await.unwrap();
-        }
-    }
-
-    #[test]
-    fn test_chrono_to_tantivy_conversion() {
-        let chrono_ts: i64 = 1_700_000_000;
-        let chrono_dt = chrono::DateTime::from_timestamp(chrono_ts, 0).unwrap();
-        let tantivy_dt = chrono_to_tantivy(chrono_dt);
-        let ts = tantivy_dt.into_timestamp_secs();
-        assert_eq!(ts, chrono_ts);
-    }
-
-    #[test]
-    fn test_term_for_path() {
-        let schema = schema::build_schema();
-        let _term = DocumentModel::term_for_path(&schema, "src/main.rs").unwrap();
-    }
-
-    #[test]
-    fn test_requeue_failed_increments_try_count() {
-        let items = vec![ChangeItem {
-            data: Change::Delete("a.txt".into()),
-            try_count: 0,
-        }];
-        let requeued = requeue_failed(items);
-        assert_eq!(requeued.len(), 1);
-        assert_eq!(requeued[0].try_count, 1);
-    }
-
-    #[test]
-    fn test_requeue_failed_drops_at_max_retry_count() {
-        let items = vec![
-            ChangeItem {
-                data: Change::Delete("dropped.txt".into()),
-                try_count: MAX_RETRY_COUNT - 1,
-            },
-            ChangeItem {
-                data: Change::Delete("kept.txt".into()),
-                try_count: 0,
-            },
-        ];
-        let requeued = requeue_failed(items);
-        assert_eq!(requeued.len(), 1);
-        assert_eq!(requeued[0].try_count, 1);
-        match &requeued[0].data {
-            Change::Delete(path) => assert_eq!(path, "kept.txt"),
-            _ => panic!("expected Delete change"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_commit_task_panic_requeues_batch() {
-        let watch_dir = make_test_temp_dir("watch");
-        let index_dir = make_test_temp_dir("index");
-        let config = Arc::new(make_test_config(&watch_dir, &index_dir));
-
-        let writer = IndexWriterWrapper::new(
-            &index_dir,
-            config.clone(),
-            crate::formats::new_text_data_cache(),
-        )
-        .await
-        .unwrap();
-        buffer_three_files(&writer, &watch_dir).await;
-        assert_eq!(writer.buffer_len().await, 6);
-
-        // Inject a panic into the blocking task: the batch must survive the
-        // JoinError and come back to the buffer, not be lost.
-        writer.panic_on_commit.store(true, Ordering::SeqCst);
-        assert!(!writer.commit().await);
-        assert_eq!(writer.buffer_len().await, 6);
-
-        // The follow-up clean commit applies the requeued batch.
-        assert!(writer.commit().await);
-        assert_eq!(writer.buffer_len().await, 0);
-        assert_eq!(writer.doc_count().unwrap(), 3);
-    }
-
-    #[tokio::test]
-    async fn test_commit_task_panic_drops_batch_after_max_retries() {
-        let watch_dir = make_test_temp_dir("watch");
-        let index_dir = make_test_temp_dir("index");
-        let config = Arc::new(make_test_config(&watch_dir, &index_dir));
-
-        let writer = IndexWriterWrapper::new(
-            &index_dir,
-            config.clone(),
-            crate::formats::new_text_data_cache(),
-        )
-        .await
-        .unwrap();
-        buffer_three_files(&writer, &watch_dir).await;
-
-        // Two failed commits: try_count goes 0 -> 1 -> 2 == MAX_RETRY_COUNT,
-        // so the batch is dropped per the retry contract.
-        writer.panic_on_commit.store(true, Ordering::SeqCst);
-        assert!(!writer.commit().await);
-        assert_eq!(writer.buffer_len().await, 6);
-
-        writer.panic_on_commit.store(true, Ordering::SeqCst);
-        assert!(!writer.commit().await);
-        assert_eq!(writer.buffer_len().await, 0);
     }
 }
