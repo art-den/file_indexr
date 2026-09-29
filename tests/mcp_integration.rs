@@ -94,6 +94,17 @@ async fn call_post(
     (status, json)
 }
 
+/// Assert that `item` is an MCP image content of `mime_type` whose base64
+/// payload decodes to exactly the `expected` bytes.
+fn assert_image_item(item: &serde_json::Value, mime_type: &str, expected: &[u8]) {
+    assert_eq!(item["type"], "image");
+    assert_eq!(item["mimeType"], mime_type);
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(item["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decoded, expected);
+}
+
 /// Create test state with files for MCP testing.
 async fn make_test_state() -> AppState {
     let watch_dir = make_temp_dir();
@@ -719,14 +730,12 @@ async fn test_mcp_tools_call_docs_get_image() {
     assert_eq!(status, StatusCode::OK);
     assert!(resp["error"].is_null());
 
-    let item = &resp["result"]["content"][0];
-    assert_eq!(item["type"], "image");
-    assert_eq!(item["mimeType"], "image/png");
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(item["data"].as_str().unwrap())
-        .unwrap();
     // Round-trip: the decoded bytes must match the file on disk.
-    assert_eq!(decoded, std::fs::read(watch_dir.join("pixel.png")).unwrap());
+    assert_image_item(
+        &resp["result"]["content"][0],
+        "image/png",
+        &std::fs::read(watch_dir.join("pixel.png")).unwrap(),
+    );
 }
 
 #[tokio::test]
@@ -780,9 +789,7 @@ async fn test_mcp_tools_call_docs_get_image_at_size_limit() {
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
     assert!(resp["error"].is_null());
-    let item = &resp["result"]["content"][0];
-    assert_eq!(item["type"], "image");
-    assert_eq!(item["mimeType"], "image/png");
+    assert_image_item(&resp["result"]["content"][0], "image/png", &exact);
 }
 
 #[tokio::test]
@@ -809,18 +816,18 @@ async fn test_mcp_tools_call_docs_get_epub_image_doc_relative() {
     assert_eq!(status, StatusCode::OK);
     assert!(resp["error"].is_null());
 
-    let item = &resp["result"]["content"][0];
-    assert_eq!(item["type"], "image");
-    assert_eq!(item["mimeType"], "image/png");
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(item["data"].as_str().unwrap())
-        .unwrap();
-    assert_eq!(decoded, std::fs::read(watch_dir.join("pixel.png")).unwrap());
+    // The decoded bytes must match the PNG stored inside the archive.
+    assert_image_item(
+        &resp["result"]["content"][0],
+        "image/png",
+        &std::fs::read(watch_dir.join("pixel.png")).unwrap(),
+    );
 }
 
 #[tokio::test]
 async fn test_mcp_tools_call_docs_get_epub_image_literal() {
     let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
     let router = create_router(state);
 
     // The literal archive entry path also works.
@@ -839,9 +846,11 @@ async fn test_mcp_tools_call_docs_get_epub_image_literal() {
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
     assert!(resp["error"].is_null());
-    let item = &resp["result"]["content"][0];
-    assert_eq!(item["type"], "image");
-    assert_eq!(item["mimeType"], "image/png");
+    assert_image_item(
+        &resp["result"]["content"][0],
+        "image/png",
+        &std::fs::read(watch_dir.join("pixel.png")).unwrap(),
+    );
 }
 
 /// Full agent cycle: read the book text, extract the image link from the
@@ -897,14 +906,12 @@ async fn test_mcp_tools_call_docs_get_epub_image_end_to_end() {
     assert_eq!(status, StatusCode::OK);
     assert!(resp["error"].is_null(), "unexpected error: {}", resp["error"]);
 
-    let item = &resp["result"]["content"][0];
-    assert_eq!(item["type"], "image");
-    assert_eq!(item["mimeType"], "image/png");
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(item["data"].as_str().unwrap())
-        .unwrap();
     // The served bytes must be the PNG stored inside the archive.
-    assert_eq!(decoded, std::fs::read(watch_dir.join("pixel.png")).unwrap());
+    assert_image_item(
+        &resp["result"]["content"][0],
+        "image/png",
+        &std::fs::read(watch_dir.join("pixel.png")).unwrap(),
+    );
 }
 
 #[tokio::test]
@@ -932,6 +939,62 @@ async fn test_mcp_tools_call_docs_get_epub_image_not_found() {
             .as_str()
             .unwrap()
             .contains("not found in EPUB archive")
+    );
+}
+
+/// Create an EPUB with an image, index it, then fetch the image via docs_get.
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_indexed_epub_image() {
+    let state = make_test_state().await;
+
+    // Index the book (make_test_state writes it to disk but does not index it;
+    // add_file returns Ok even when skipping, so verify the index below).
+    state
+        .writer
+        .add_file(state.config.directory.join("book.epub"))
+        .await
+        .unwrap();
+    state.writer.commit().await;
+
+    let res = file_indexr::search::search(
+        &state.reader,
+        file_indexr::search::SearchParams {
+            q: "chapter".to_string(),
+            ..Default::default()
+        },
+        &state.config.directory,
+        &state.text_data_cache,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        res.results.iter().any(|r| r.path == "book.epub"),
+        "book.epub was not indexed; got: {:?}",
+        res.results.iter().map(|r| r.path.as_str()).collect::<Vec<_>>()
+    );
+
+    // The image must be fetchable through the virtual path after indexing.
+    let router = create_router(state);
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 18,
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "book.epub/images/pic.png"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_null());
+    assert_image_item(
+        &resp["result"]["content"][0],
+        "image/png",
+        &base64::engine::general_purpose::STANDARD.decode(TEST_PNG_B64).unwrap(),
     );
 }
 
@@ -995,9 +1058,11 @@ async fn test_mcp_tools_call_docs_get_epub_dir_falls_through_to_disk() {
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
     assert!(resp["error"].is_null());
-    let item = &resp["result"]["content"][0];
-    assert_eq!(item["type"], "image");
-    assert_eq!(item["mimeType"], "image/png");
+    assert_image_item(
+        &resp["result"]["content"][0],
+        "image/png",
+        &std::fs::read(watch_dir.join("fake.epub/pic.png")).unwrap(),
+    );
 }
 
 #[tokio::test]
