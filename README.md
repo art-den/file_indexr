@@ -89,7 +89,7 @@ Command-line arguments override config file values.
 | --------- | ------ | -------- | ------------------------------ |
 | `path`    | string | Yes      | Relative path from search results. |
 
-**`docs_get`** — Read file content. Supports line-range reads and auto-truncation at 100 lines.
+**`docs_get`** — Read file content. Text files support line-range reads and auto-truncation at 100 lines. Image files are returned as MCP image content (base64), subject to the `max_file_size_mb` limit.
 
 | Parameter    | Type    | Required | Description                                     |
 | ------------ | ------- | -------- | ----------------------------------------------- |
@@ -98,6 +98,8 @@ Command-line arguments override config file values.
 | `end_line`   | integer | No       | 1-based ending line number (inclusive).         |
 
 Supported formats for `docs_headings` and `docs_get`: `txt`, `md`, `rs`, `py`, `htm`, `html`, `pdf`, `epub`, `rst`, `rest`.
+
+Supported image formats for `docs_get`: `png`, `jpg`, `jpeg`, `gif`, `webp`, `bmp`, `tif`, `tiff`, `ico`, `svg`.
 
 ### Web UI
 

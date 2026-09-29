@@ -7,12 +7,17 @@ use axum::http::StatusCode;
 use file_indexr::config::Config;
 use file_indexr::index::writer::IndexWriterWrapper;
 use file_indexr::mcp::jsonrpc::{INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR};
+use base64::Engine;
 use file_indexr::{AppState, api::create_router, mcp};
 use serde_json::json;
 
 fn make_temp_dir() -> PathBuf {
     file_indexr::testutil::unique_temp_dir("mcp_test")
 }
+
+/// A minimal valid 1x1 PNG, base64-encoded.
+const TEST_PNG_B64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
 /// Helper to call the router with a GET request.
 async fn call_get(router: axum::Router, uri: &str) -> StatusCode {
@@ -78,6 +83,10 @@ async fn make_test_state() -> AppState {
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(watch_dir.join("large.txt"), &large_content).unwrap();
+
+    // 1x1 PNG for image tool testing
+    let png = base64::engine::general_purpose::STANDARD.decode(TEST_PNG_B64).unwrap();
+    std::fs::write(watch_dir.join("pixel.png"), &png).unwrap();
 
     let config = Arc::new(Config {
         directory: watch_dir,
@@ -646,6 +655,124 @@ async fn test_mcp_tools_call_docs_get_absolute_path() {
 // ============================================================================
 // POST /mcp — unknown tool
 // ============================================================================
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_image() {
+    let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
+    let router = create_router(state);
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 13,
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "pixel.png"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_null());
+
+    let item = &resp["result"]["content"][0];
+    assert_eq!(item["type"], "image");
+    assert_eq!(item["mimeType"], "image/png");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(item["data"].as_str().unwrap())
+        .unwrap();
+    // Round-trip: the decoded bytes must match the file on disk.
+    assert_eq!(decoded, std::fs::read(watch_dir.join("pixel.png")).unwrap());
+}
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_image_too_large() {
+    let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
+    // Exceed the configured max_file_size_mb (2 → 2_000_000 bytes).
+    let big = vec![0u8; state.config.max_file_size_bytes() as usize + 1];
+    std::fs::write(watch_dir.join("big.png"), &big).unwrap();
+    let router = create_router(state);
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "img_large",
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "big.png"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_object());
+    assert!(resp["error"]["message"].as_str().unwrap().contains("too large"));
+}
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_image_at_size_limit() {
+    let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
+    // Exactly at the limit — must succeed (the limit is inclusive).
+    let exact = vec![0u8; state.config.max_file_size_bytes() as usize];
+    std::fs::write(watch_dir.join("exact.png"), &exact).unwrap();
+    let router = create_router(state);
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "img_exact",
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "exact.png"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_null());
+    let item = &resp["result"]["content"][0];
+    assert_eq!(item["type"], "image");
+    assert_eq!(item["mimeType"], "image/png");
+}
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_unsupported_format() {
+    let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
+    std::fs::write(watch_dir.join("data.bin"), b"binary").unwrap();
+    let router = create_router(state);
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "bin_format",
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "data.bin"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_object());
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unsupported format")
+    );
+}
 
 #[tokio::test]
 async fn test_mcp_tools_call_unknown_tool() {

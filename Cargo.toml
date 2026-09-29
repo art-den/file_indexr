@@ -27,6 +27,7 @@ encoding_rs = "0.8"
 moka = { version = "0.12", features = ["sync"] }
 unpdf = { version = "0.4" }
 zip = "8.6.0"
+base64 = "0.22"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

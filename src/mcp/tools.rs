@@ -48,7 +48,7 @@ impl Tools {
             ),
             Self::describe(
                 "docs_get",
-                "Read content of a documentation page. This is the ONLY way to read documentation files found by docs_search — do NOT try to use read_file on those paths (they are not local project files). Use start_line and end_line to read a specific section — get these values from docs_headings first. Without line range, returns the beginning of the file only.",
+                "Read content of a documentation page. This is the ONLY way to read documentation files found by docs_search — do NOT try to use read_file on those paths (they are not local project files). Text files (txt, md, rs, py, htm, html, pdf, epub, rst, rest) are returned as text — use start_line and end_line to read a specific section, get these values from docs_headings first; without line range, returns the beginning of the file only. Image files (png, jpg, jpeg, gif, webp, bmp, tif, tiff, ico, svg) are returned as image content.",
                 &[
                     (
                         "path",
@@ -182,6 +182,11 @@ impl Tools {
         let path = extract_str(args, "path")?;
         let resolved = validate_doc_path(path, state).await.map_err(mcp_error)?;
 
+        // Images skip text normalization and are returned as MCP image content.
+        if let Some(mime) = image_mime_type(&resolved) {
+            return Self::serve_image(&resolved, mime, state).await;
+        }
+
         let start_line = extract_u64(args, "start_line");
         let end_line = extract_u64(args, "end_line");
 
@@ -219,6 +224,32 @@ impl Tools {
         };
 
         Ok(text_result(format!("{path}\n\n{body}")))
+    }
+
+    /// Read an image file from disk and return it as MCP image content (base64).
+    async fn serve_image(
+        resolved: &std::path::Path,
+        mime: &str,
+        state: &AppState,
+    ) -> Result<Value, Error> {
+        let metadata = tokio::fs::metadata(resolved)
+            .await
+            .map_err(|e| mcp_error(format!("Failed to read file: {e}")))?;
+        let max_bytes = state.config.max_file_size_bytes();
+        if metadata.len() > max_bytes {
+            return Err(mcp_error(format!(
+                "File is too large ({} bytes, limit {} bytes)",
+                metadata.len(),
+                max_bytes
+            )));
+        }
+
+        let bytes = tokio::fs::read(resolved)
+            .await
+            .map_err(|e| mcp_error(format!("Failed to read file: {e}")))?;
+        let data =
+            base64::engine::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+        Ok(image_result(&data, mime))
     }
 }
 
@@ -260,6 +291,30 @@ fn text_result(text: impl Into<String>) -> Value {
     json!({
         "content": [{ "type": "text", "text": text }],
         "isError": false,
+    })
+}
+
+fn image_result(data: &str, mime_type: &str) -> Value {
+    json!({
+        "content": [{ "type": "image", "data": data, "mimeType": mime_type }],
+        "isError": false,
+    })
+}
+
+/// MIME type for supported image extensions (case-insensitive), or `None`
+/// if the path is not a supported image format.
+fn image_mime_type(file_path: &std::path::Path) -> Option<&'static str> {
+    let ext = file_path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "ico" => "image/x-icon",
+        "svg" => "image/svg+xml",
+        _ => return None,
     })
 }
 
@@ -365,5 +420,51 @@ mod tests {
         // 'м'=bytes 0-1, 'и'=bytes 2-3, 'р'=bytes 4-5
         // max=3 is inside 'и' → cutoff falls back to 2 (start of 'и')
         assert_eq!(truncate("мир", 3), "м...");
+    }
+
+    #[test]
+    fn test_image_mime_type_supported() {
+        use std::path::Path;
+        assert_eq!(image_mime_type(Path::new("a.png")).unwrap(), "image/png");
+        assert_eq!(image_mime_type(Path::new("a.jpg")).unwrap(), "image/jpeg");
+        assert_eq!(
+            image_mime_type(Path::new("a.jpeg")).unwrap(),
+            "image/jpeg"
+        );
+        assert_eq!(
+            image_mime_type(Path::new("a.gif")).unwrap(),
+            "image/gif"
+        );
+        assert_eq!(
+            image_mime_type(Path::new("a.webp")).unwrap(),
+            "image/webp"
+        );
+        assert_eq!(image_mime_type(Path::new("a.bmp")).unwrap(), "image/bmp");
+        assert_eq!(
+            image_mime_type(Path::new("a.tiff")).unwrap(),
+            "image/tiff"
+        );
+        assert_eq!(image_mime_type(Path::new("a.tif")).unwrap(), "image/tiff");
+        assert_eq!(
+            image_mime_type(Path::new("a.ico")).unwrap(),
+            "image/x-icon"
+        );
+        assert_eq!(
+            image_mime_type(Path::new("a.svg")).unwrap(),
+            "image/svg+xml"
+        );
+        // Extensions are case-insensitive
+        assert_eq!(
+            image_mime_type(Path::new("a.PnG")).unwrap(),
+            "image/png"
+        );
+    }
+
+    #[test]
+    fn test_image_mime_type_unsupported() {
+        use std::path::Path;
+        assert!(image_mime_type(Path::new("a.txt")).is_none());
+        assert!(image_mime_type(Path::new("a.rs")).is_none());
+        assert!(image_mime_type(Path::new("a")).is_none());
     }
 }
