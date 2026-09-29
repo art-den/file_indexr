@@ -101,6 +101,8 @@ Supported formats for `docs_headings` and `docs_get`: `txt`, `md`, `rs`, `py`, `
 
 Supported image formats for `docs_get`: `png`, `jpg`, `jpeg`, `gif`, `webp`, `bmp`, `tif`, `tiff`, `ico`, `svg`.
 
+Images stored inside an EPUB file are requested with a virtual path: `docs_get(path="book.epub/images/pic.png")` — the part after the EPUB name is the image path as written in the document. Literal archive entry paths (`book.epub/OEBPS/Text/images/pic.png`) work too.
+
 ### Web UI
 
 Open `http://127.0.0.1:8080/` in a browser for a visual search interface.

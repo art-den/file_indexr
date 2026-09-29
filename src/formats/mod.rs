@@ -54,6 +54,10 @@ pub struct FileStructure {
     pub total_lines: usize,
 }
 
+/// Read an image entry from an EPUB archive by document-relative path
+/// (implemented in the `epub` module). Re-exported for the MCP tools.
+pub use epub::read_image_entry;
+
 const CACHE_MAX_SIZE: u64 = 1024;
 
 /// LRU cache of normalized file text. The canonical handle lives in `AppState`;

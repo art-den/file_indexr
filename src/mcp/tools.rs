@@ -48,12 +48,12 @@ impl Tools {
             ),
             Self::describe(
                 "docs_get",
-                "Read content of a documentation page. This is the ONLY way to read documentation files found by docs_search — do NOT try to use read_file on those paths (they are not local project files). Text files (txt, md, rs, py, htm, html, pdf, epub, rst, rest) are returned as text — use start_line and end_line to read a specific section, get these values from docs_headings first; without line range, returns the beginning of the file only. Image files (png, jpg, jpeg, gif, webp, bmp, tif, tiff, ico, svg) are returned as image content.",
+                "Read content of a documentation page. This is the ONLY way to read documentation files found by docs_search — do NOT try to use read_file on those paths (they are not local project files). Text files (txt, md, rs, py, htm, html, pdf, epub, rst, rest) are returned as text — use start_line and end_line to read a specific section, get these values from docs_headings first; without line range, returns the beginning of the file only. Image files (png, jpg, jpeg, gif, webp, bmp, tif, tiff, ico, svg) are returned as image content. Images inside EPUB files are requested with a virtual path '<book.epub>/<path-as-written-in-the-document>', e.g. 'book.epub/images/pic.png'.",
                 &[
                     (
                         "path",
                         "string",
-                        "Relative path from docs_search or docs_headings results (NOT a local file path — use this tool, not read_file)",
+                        "Relative path from docs_search or docs_headings results (NOT a local file path — use this tool, not read_file). For images inside an EPUB, use the virtual form '<book.epub>/<path-as-written-in-the-document>'.",
                     ),
                     (
                         "start_line",
@@ -180,11 +180,22 @@ impl Tools {
 
     async fn handle_get(args: &Value, state: &AppState) -> Result<Value, Error> {
         let path = extract_str(args, "path")?;
+
+        // Virtual archive path ("<file.epub>/<inner>") — serve an image
+        // stored inside an EPUB; the inner path may be document-relative.
+        // Commits only when the outer part is a regular file, so a
+        // directory named `x.epub` still falls through to the on-disk flow.
+        if let Some((epub_rel, inner)) = split_virtual_epub_path(path) {
+            if is_regular_file(epub_rel, state).await {
+                return Self::serve_epub_image(epub_rel, inner, state).await;
+            }
+        }
+
         let resolved = validate_doc_path(path, state).await.map_err(mcp_error)?;
 
         // Images skip text normalization and are returned as MCP image content.
-        if let Some(mime) = image_mime_type(&resolved) {
-            return Self::serve_image(&resolved, mime, state).await;
+        if image_mime_type(&resolved).is_some() {
+            return Self::serve_image(&resolved, state).await;
         }
 
         let start_line = extract_u64(args, "start_line");
@@ -227,11 +238,8 @@ impl Tools {
     }
 
     /// Read an image file from disk and return it as MCP image content (base64).
-    async fn serve_image(
-        resolved: &std::path::Path,
-        mime: &str,
-        state: &AppState,
-    ) -> Result<Value, Error> {
+    async fn serve_image(resolved: &std::path::Path, state: &AppState) -> Result<Value, Error> {
+        // Size check before reading so oversized files are not loaded at all.
         let metadata = tokio::fs::metadata(resolved)
             .await
             .map_err(|e| mcp_error(format!("Failed to read file: {e}")))?;
@@ -247,13 +255,40 @@ impl Tools {
         let bytes = tokio::fs::read(resolved)
             .await
             .map_err(|e| mcp_error(format!("Failed to read file: {e}")))?;
-        let data =
-            base64::engine::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-        Ok(image_result(&data, mime))
+        image_content(&bytes, resolved, state)
+    }
+
+    /// Serve an image stored inside an EPUB archive (virtual path
+    /// "<file.epub>/<inner>").
+    async fn serve_epub_image(
+        epub_rel: &str,
+        inner: &str,
+        state: &AppState,
+    ) -> Result<Value, Error> {
+        let resolved = validate_doc_path(epub_rel, state).await.map_err(mcp_error)?;
+
+        let inner = inner.to_string();
+        let max_bytes = state.config.max_file_size_bytes();
+        let (name, bytes) = tokio::task::spawn_blocking(move || {
+            crate::formats::read_image_entry(&resolved, &inner, max_bytes)
+        })
+        .await
+        .map_err(|e| mcp_error(format!("Failed to read EPUB: {e}")))?
+        .map_err(|e| mcp_error(e.to_string()))?;
+
+        image_content(&bytes, std::path::Path::new(&name), state)
     }
 }
 
 // ---- Helpers ----
+
+/// True if the relative path resolves to a regular file inside the watched directory.
+async fn is_regular_file(rel_path: &str, state: &AppState) -> bool {
+    let PathValidateResult::Valid(full) = state.config.validate_path(rel_path).await else {
+        return false;
+    };
+    tokio::fs::metadata(&full).await.is_ok_and(|m| m.is_file())
+}
 
 /// Validate a docs tool path argument.
 async fn validate_doc_path(path: &str, state: &AppState) -> Result<std::path::PathBuf, String> {
@@ -299,6 +334,62 @@ fn image_result(data: &str, mime_type: &str) -> Value {
         "content": [{ "type": "image", "data": data, "mimeType": mime_type }],
         "isError": false,
     })
+}
+
+/// Shared tail of the image-serving paths: MIME check by extension, size
+/// limit, base64 encoding, MCP image content.
+fn image_content(
+    bytes: &[u8],
+    file_path: &std::path::Path,
+    state: &AppState,
+) -> Result<Value, Error> {
+    let mime = image_mime_type(file_path).ok_or_else(|| {
+        mcp_error(format!(
+            "Unsupported image format: {}",
+            file_path.display()
+        ))
+    })?;
+    let max_bytes = state.config.max_file_size_bytes();
+    if bytes.len() as u64 > max_bytes {
+        return Err(mcp_error(format!(
+            "File is too large ({} bytes, limit {} bytes)",
+            bytes.len(),
+            max_bytes
+        )));
+    }
+    let data = base64::engine::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
+    Ok(image_result(&data, mime))
+}
+
+/// Split a virtual archive path "<file.epub>/<inner>" into its parts.
+/// The outer part is the leftmost prefix ending in an .epub component;
+/// the inner part must be non-empty. Absolute paths are not virtual.
+fn split_virtual_epub_path(path: &str) -> Option<(&str, &str)> {
+    if path.starts_with('/') {
+        return None;
+    }
+    // Leftmost '/' such that the outer part ends in an .epub component
+    // and the inner part is non-empty.
+    for (i, c) in path.char_indices() {
+        if c != '/' {
+            continue;
+        }
+        let (outer, inner) = path.split_at(i);
+        let inner = &inner[1..];
+        if inner.is_empty() {
+            return None;
+        }
+        if ends_with_epub(outer) {
+            return Some((outer, inner));
+        }
+    }
+    None
+}
+
+fn ends_with_epub(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("epub"))
 }
 
 /// MIME type for supported image extensions (case-insensitive), or `None`
@@ -466,5 +557,23 @@ mod tests {
         assert!(image_mime_type(Path::new("a.txt")).is_none());
         assert!(image_mime_type(Path::new("a.rs")).is_none());
         assert!(image_mime_type(Path::new("a")).is_none());
+    }
+
+    #[test]
+    fn test_split_virtual_epub_path() {
+        assert_eq!(
+            split_virtual_epub_path("book.epub/images/pic.png"),
+            Some(("book.epub", "images/pic.png"))
+        );
+        assert_eq!(
+            split_virtual_epub_path("docs/book.EPUB/a.png"),
+            Some(("docs/book.EPUB", "a.png"))
+        );
+        // Not virtual: no inner part, empty inner, wrong extension, no slash.
+        assert_eq!(split_virtual_epub_path("book.epub"), None);
+        assert_eq!(split_virtual_epub_path("book.epub/"), None);
+        assert_eq!(split_virtual_epub_path("book.md/a.png"), None);
+        assert_eq!(split_virtual_epub_path("/book.epub/a.png"), None);
+        assert_eq!(split_virtual_epub_path("plain.png"), None);
     }
 }

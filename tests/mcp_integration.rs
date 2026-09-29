@@ -19,6 +19,45 @@ fn make_temp_dir() -> PathBuf {
 const TEST_PNG_B64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
+/// Build a minimal EPUB whose document references `images/pic.png` relative
+/// to its own location; the actual archive entry is `OEBPS/Text/images/pic.png`
+/// (so document-relative requests need suffix resolution).
+fn build_epub_bytes(png: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let container = r#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#;
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="ch1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="img" href="Text/images/pic.png" media-type="image/png"/>
+  </manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+    let xhtml = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<h1>Chapter</h1>
+<p>See <img src="images/pic.png" alt="pic"/> in this chapter.</p>
+</body></html>"#;
+
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, content) in [
+        ("META-INF/container.xml", container.as_bytes()),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/Text/ch1.xhtml", xhtml.as_bytes()),
+    ] {
+        writer.start_file(name, options).unwrap();
+        writer.write_all(content).unwrap();
+    }
+    writer.start_file("OEBPS/Text/images/pic.png", options).unwrap();
+    writer.write_all(png).unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
 /// Helper to call the router with a GET request.
 async fn call_get(router: axum::Router, uri: &str) -> StatusCode {
     let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
@@ -87,6 +126,8 @@ async fn make_test_state() -> AppState {
     // 1x1 PNG for image tool testing
     let png = base64::engine::general_purpose::STANDARD.decode(TEST_PNG_B64).unwrap();
     std::fs::write(watch_dir.join("pixel.png"), &png).unwrap();
+    // EPUB containing that image for virtual-path testing
+    std::fs::write(watch_dir.join("book.epub"), build_epub_bytes(&png)).unwrap();
 
     let config = Arc::new(Config {
         directory: watch_dir,
@@ -742,6 +783,249 @@ async fn test_mcp_tools_call_docs_get_image_at_size_limit() {
     let item = &resp["result"]["content"][0];
     assert_eq!(item["type"], "image");
     assert_eq!(item["mimeType"], "image/png");
+}
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_epub_image_doc_relative() {
+    let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
+    let router = create_router(state);
+
+    // The document writes `images/pic.png`; the archive entry is
+    // `OEBPS/Text/images/pic.png` — resolved via unique suffix match.
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 14,
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "book.epub/images/pic.png"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_null());
+
+    let item = &resp["result"]["content"][0];
+    assert_eq!(item["type"], "image");
+    assert_eq!(item["mimeType"], "image/png");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(item["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decoded, std::fs::read(watch_dir.join("pixel.png")).unwrap());
+}
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_epub_image_literal() {
+    let state = make_test_state().await;
+    let router = create_router(state);
+
+    // The literal archive entry path also works.
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 15,
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "book.epub/OEBPS/Text/images/pic.png"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_null());
+    let item = &resp["result"]["content"][0];
+    assert_eq!(item["type"], "image");
+    assert_eq!(item["mimeType"], "image/png");
+}
+
+/// Full agent cycle: read the book text, extract the image link from the
+/// converted Markdown, and request the image by exactly that path.
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_epub_image_end_to_end() {
+    let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
+    let router = create_router(state.clone());
+
+    // 1. The agent reads the book.
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 16,
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": { "path": "book.epub" }
+        }
+    });
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_null());
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.contains("Chapter"), "unexpected book text: {text}");
+
+    // 2. The agent extracts the image link from the converted Markdown.
+    let img = text.find("![").expect("converted text has no image link");
+    let rest = &text[img + 2..];
+    let src = rest
+        .find("](")
+        .map_or("", |i| &rest[i + 2..])
+        .split(')')
+        .next()
+        .unwrap_or("");
+    assert!(!src.is_empty(), "no image link src in: {text}");
+
+    // 3. The agent requests the image by that link, relative to the EPUB.
+    let router = create_router(state);
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 17,
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": { "path": format!("book.epub/{src}") }
+        }
+    });
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_null(), "unexpected error: {}", resp["error"]);
+
+    let item = &resp["result"]["content"][0];
+    assert_eq!(item["type"], "image");
+    assert_eq!(item["mimeType"], "image/png");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(item["data"].as_str().unwrap())
+        .unwrap();
+    // The served bytes must be the PNG stored inside the archive.
+    assert_eq!(decoded, std::fs::read(watch_dir.join("pixel.png")).unwrap());
+}
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_epub_image_not_found() {
+    let state = make_test_state().await;
+    let router = create_router(state);
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "epub_nf",
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "book.epub/missing.png"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_object());
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not found in EPUB archive")
+    );
+}
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_epub_virtual_rejects_non_image() {
+    let state = make_test_state().await;
+    let router = create_router(state);
+
+    // The extension check is the only guard against extracting arbitrary
+    // archive entries via the virtual path — pin it.
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "epub_nonimage",
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "book.epub/OEBPS/Text/ch1.xhtml"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_object());
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unsupported image format")
+    );
+}
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_epub_dir_falls_through_to_disk() {
+    let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
+
+    // A directory named `x.epub` must NOT trigger the virtual branch:
+    // the on-disk file inside it is served through the normal flow.
+    std::fs::create_dir(watch_dir.join("fake.epub")).unwrap();
+    std::fs::write(
+        watch_dir.join("fake.epub/pic.png"),
+        base64::engine::general_purpose::STANDARD.decode(TEST_PNG_B64).unwrap(),
+    )
+    .unwrap();
+    let router = create_router(state);
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "epub_dir",
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "fake.epub/pic.png"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_null());
+    let item = &resp["result"]["content"][0];
+    assert_eq!(item["type"], "image");
+    assert_eq!(item["mimeType"], "image/png");
+}
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_epub_missing_archive() {
+    let state = make_test_state().await;
+    let router = create_router(state);
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "epub_noarchive",
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "nothere.epub/x.png"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_object());
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("File not found")
+    );
 }
 
 #[tokio::test]

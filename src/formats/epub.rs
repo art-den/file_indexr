@@ -10,6 +10,9 @@ use zip::ZipArchive;
 /// Location of the OPC container descriptor inside an EPUB archive.
 const CONTAINER_PATH: &str = "META-INF/container.xml";
 
+/// Maximum number of ambiguous-match candidates listed in an error message.
+const MAX_CANDIDATES_SHOWN: usize = 5;
+
 /// Compiled regexes for the fixed set of OPF attributes we extract.
 static ATTR_REGEXES: LazyLock<HashMap<&'static str, Regex>> = LazyLock::new(|| {
     ["id", "href", "media-type", "idref", "full-path"]
@@ -50,6 +53,95 @@ pub async fn load_from_file_and_convert_to_md(file_path: &Path) -> anyhow::Resul
         to_markdown(&buffer)
     })
     .await?
+}
+
+/// Read an image from an EPUB archive by document-relative path.
+///
+/// `inner_path` is looked up literally first (a leading '/' and any
+/// `#fragment` are stripped). If no entry matches, a suffix match against
+/// entry names is attempted: documents reference images relative to their
+/// own location, so `images/pic.png` usually resolves to e.g.
+/// `Text/images/pic.png`. A unique suffix match is returned; multiple
+/// matches are reported together with the candidates.
+///
+/// Returns the resolved entry name and the image bytes.
+pub fn read_image_entry(
+    archive_path: &Path,
+    inner_path: &str,
+    max_bytes: u64,
+) -> anyhow::Result<(String, Vec<u8>)> {
+    let file = std::fs::File::open(archive_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open EPUB {}: {e}", archive_path.display()))?;
+    let mut archive = ZipArchive::new(file).map_err(|_| {
+        anyhow::anyhow!("Not a valid EPUB (zip) archive: {}", archive_path.display())
+    })?;
+
+    let target = inner_path.split('#').next().unwrap().trim_start_matches('/');
+    if target.is_empty() {
+        return Err(anyhow::anyhow!("Empty image path in EPUB archive"));
+    }
+
+    // Entry names are opaque zip strings and cannot escape the archive.
+    let names: Vec<String> = (0..archive.len())
+        .filter_map(|i| archive.by_index(i).ok().map(|e| e.name().to_string()))
+        .collect();
+
+    // 1) Literal match. 2) Unique suffix match.
+    let resolved = if let Some(name) = names.iter().find(|n| n.as_str() == target) {
+        name.clone()
+    } else {
+        let suffix = format!("/{target}");
+        let matches: Vec<&str> = names
+            .iter()
+            .filter(|n| n.ends_with(&suffix))
+            .map(|s| s.as_str())
+            .collect();
+        match matches.len() {
+            0 => {
+                return Err(anyhow::anyhow!(
+                    "Image '{inner_path}' not found in EPUB archive"
+                ))
+            }
+            1 => matches[0].to_string(),
+            n => {
+                let shown = matches
+                    .iter()
+                    .take(MAX_CANDIDATES_SHOWN)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(anyhow::anyhow!(
+                    "Ambiguous image path '{inner_path}' in EPUB archive: {n} candidates ({shown})"
+                ));
+            }
+        }
+    };
+
+    let entry = archive.by_name(&resolved)?;
+    // The declared size comes from the (untrusted) central directory: use it
+    // only as an early-out and a capacity hint; the actual read is bounded.
+    let declared = entry.size();
+    if declared > max_bytes {
+        return Err(anyhow::anyhow!(
+            "Image '{}' is too large ({} bytes, limit {} bytes)",
+            resolved,
+            declared,
+            max_bytes
+        ));
+    }
+    // Here `declared <= max_bytes`, so the capacity stays bounded by the limit.
+    let mut buf = Vec::with_capacity(usize::try_from(declared).unwrap_or(usize::MAX));
+    entry
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut buf)?;
+    if buf.len() as u64 > max_bytes {
+        return Err(anyhow::anyhow!(
+            "Image '{}' is too large (more than {} bytes)",
+            resolved,
+            max_bytes
+        ));
+    }
+    Ok((resolved, buf))
 }
 
 /// Extract the EPUB spine documents in reading order and convert them to Markdown.
@@ -261,6 +353,83 @@ mod tests {
     use super::*;
     use crate::formats::{FileFormat, FileTextData};
     use std::io::Write;
+
+    fn image_test_epub(dir: &Path, name: &str, entries: &[(&str, Vec<u8>)]) -> std::path::PathBuf {
+        let path = dir.join(name);
+        write_zip_bytes(&path, entries);
+        path
+    }
+
+    fn image_epub_entries(png_name: &str) -> Vec<(&str, Vec<u8>)> {
+        vec![
+            ("META-INF/container.xml", CONTAINER.as_bytes().to_vec()),
+            ("OEBPS/content.opf", b"<package/>".to_vec()),
+            ("OEBPS/Text/ch1.xhtml", b"<html/>".to_vec()),
+            (png_name, b"PNGDATA".to_vec()),
+        ]
+    }
+
+    #[test]
+    fn test_epub_read_image_entry() {
+        let dir = crate::testutil::unique_temp_dir("epub_img_test");
+        let path = image_test_epub(&dir, "book.epub", &image_epub_entries("OEBPS/Text/images/pic.png"));
+
+        // Document-relative path resolves via the unique suffix.
+        let (name, bytes) = read_image_entry(&path, "images/pic.png", 1024).unwrap();
+        assert_eq!(name, "OEBPS/Text/images/pic.png");
+        assert_eq!(bytes.as_slice(), b"PNGDATA");
+
+        // The literal archive entry path also works.
+        let (name, _) = read_image_entry(&path, "OEBPS/Text/images/pic.png", 1024).unwrap();
+        assert_eq!(name, "OEBPS/Text/images/pic.png");
+
+        // Leading '/' and '#fragment' are stripped.
+        let (name, _) =
+            read_image_entry(&path, "/OEBPS/Text/images/pic.png#fig", 1024).unwrap();
+        assert_eq!(name, "OEBPS/Text/images/pic.png");
+
+        // Not found.
+        let err = read_image_entry(&path, "nope.png", 1024).unwrap_err();
+        assert!(err.to_string().contains("not found"));
+
+        // Empty target after stripping.
+        assert!(read_image_entry(&path, "#frag", 1024).is_err());
+        assert!(read_image_entry(&path, "/", 1024).is_err());
+    }
+
+    #[test]
+    fn test_epub_read_image_entry_ambiguous_and_limits() {
+        let dir = crate::testutil::unique_temp_dir("epub_img_test2");
+        let path = image_test_epub(
+            &dir,
+            "ambig.epub",
+            &[
+                ("META-INF/container.xml", CONTAINER.as_bytes().to_vec()),
+                ("a/images/pic.png", b"A".to_vec()),
+                ("b/images/pic.png", b"B".to_vec()),
+            ],
+        );
+
+        // Two suffix matches → ambiguity with candidates.
+        let msg = read_image_entry(&path, "images/pic.png", 1024).unwrap_err().to_string();
+        assert!(msg.contains("Ambiguous"));
+        assert!(msg.contains("a/images/pic.png"));
+        assert!(msg.contains("b/images/pic.png"));
+
+        // Literal paths still work.
+        let (name, bytes) = read_image_entry(&path, "b/images/pic.png", 1024).unwrap();
+        assert_eq!(name, "b/images/pic.png");
+        assert_eq!(bytes.as_slice(), b"B");
+
+        // Size limit (entry is 1 byte, limit 0).
+        let msg = read_image_entry(&path, "a/images/pic.png", 0).unwrap_err().to_string();
+        assert!(msg.contains("too large"));
+
+        // Not a zip archive.
+        let not_zip = dir.join("notzip.epub");
+        std::fs::write(&not_zip, b"no zip here").unwrap();
+        assert!(read_image_entry(&not_zip, "x.png", 1024).is_err());
+    }
 
     const CONTAINER: &str = r#"<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
