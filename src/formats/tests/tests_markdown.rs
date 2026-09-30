@@ -1,4 +1,4 @@
-use crate::formats::markdown::*;
+use super::*;
 
 #[test]
 fn test_structure_basic() {

@@ -14,8 +14,12 @@ use tokio::sync::Mutex;
 use crate::config::Config;
 use crate::schema;
 
+#[cfg(test)]
+#[path = "tests/tests_writer.rs"]
+mod tests;
+
 /// Convert a chrono DateTime to tantivy's DateTime, preserving nanosecond precision.
-pub (super) fn chrono_to_tantivy(dt: chrono::DateTime<chrono::Utc>) -> tantivy::DateTime {
+fn chrono_to_tantivy(dt: chrono::DateTime<chrono::Utc>) -> tantivy::DateTime {
     // Nanosecond precision: the startup scan compares the filesystem mtime against
     // this stored value, and equality must be exact for unchanged files.
     match dt.timestamp_nanos_opt() {
@@ -168,22 +172,22 @@ impl DocumentModel {
 
 /// Buffered change pending commit.
 #[derive(Debug)]
-pub (super) enum Change {
+enum Change {
     Add(Document),
     Delete(String),    // exact relative path for deletion
     DeleteDir(String), // prefix — delete all docs whose path starts with this
 }
 
 /// Maximum number of failed commit attempts before a change is dropped.
-pub (super) const MAX_RETRY_COUNT: usize = 2;
+const MAX_RETRY_COUNT: usize = 2;
 
 /// A buffered change awaiting commit. Retried on failure up to a max attempt limit.
 #[derive(Debug)]
-pub (super) struct ChangeItem {
+struct ChangeItem {
     /// The actual operation to apply.
-    pub (super) data: Change,
+    data: Change,
     /// Number of failed attempts. Incremented on each retry; dropped when >= MAX_RETRY_COUNT.
-    pub (super) try_count: usize,
+    try_count: usize,
 }
 
 impl ChangeItem {
@@ -194,7 +198,7 @@ impl ChangeItem {
 
 /// Increment `try_count` on each failed item and drop those that reached
 /// `MAX_RETRY_COUNT`. Returns the survivors to be requeued in the buffer.
-pub (super) fn requeue_failed(mut failed: Vec<ChangeItem>) -> Vec<ChangeItem> {
+fn requeue_failed(mut failed: Vec<ChangeItem>) -> Vec<ChangeItem> {
     failed.retain_mut(|change| {
         change.try_count += 1;
         if change.try_count >= MAX_RETRY_COUNT {
@@ -228,7 +232,7 @@ pub struct IndexWriterWrapper {
     /// Test seam: makes the next commit's blocking task panic, to exercise
     /// the JoinError batch-recovery path.
     #[cfg(test)]
-    pub (super) panic_on_commit: Arc<AtomicBool>,
+    panic_on_commit: Arc<AtomicBool>,
 }
 
 impl IndexWriterWrapper {

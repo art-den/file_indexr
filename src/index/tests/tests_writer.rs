@@ -1,6 +1,6 @@
 use std::{path::{Path, PathBuf}, sync::{Arc, atomic::Ordering}};
 
-use crate::{config::Config, index::writer::*, schema};
+use super::*;
 
 fn make_test_temp_dir(kind: &str) -> PathBuf {
     crate::testutil::unique_temp_dir(&format!("unit_test_{kind}"))

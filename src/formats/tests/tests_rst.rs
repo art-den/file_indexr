@@ -1,4 +1,4 @@
-use crate::formats::rst::*;
+use super::*;
 
 #[test]
 fn test_section_titles_become_atx_headings() {

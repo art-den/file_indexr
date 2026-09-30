@@ -9,6 +9,10 @@ use crate::AppState;
 use crate::config::PathValidateResult;
 use crate::search::{self, SearchParams};
 
+#[cfg(test)]
+#[path = "tests/tests_tools.rs"]
+mod tests;
+
 /// Maximum byte length of a snippet shown in `docs_search` results.
 const DOCS_SEARCH_SNIPPET_MAX_BYTES: usize = 200;
 
@@ -304,7 +308,7 @@ async fn validate_doc_path(path: &str, state: &AppState) -> Result<std::path::Pa
     }
 }
 
-pub(super) fn extract_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, Error> {
+fn extract_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, Error> {
     args.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
         Error::new(
             INVALID_PARAMS,
@@ -313,7 +317,7 @@ pub(super) fn extract_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, Err
     })
 }
 
-pub(super) fn extract_u64(args: &Value, key: &str) -> Option<u64> {
+fn extract_u64(args: &Value, key: &str) -> Option<u64> {
     args.get(key).and_then(|v| v.as_u64())
 }
 
@@ -364,7 +368,7 @@ fn image_content(
 /// Split a virtual archive path "<file.epub>/<inner>" into its parts.
 /// The outer part is the leftmost prefix ending in an .epub component;
 /// the inner part must be non-empty. Absolute paths are not virtual.
-pub(super) fn split_virtual_epub_path(path: &str) -> Option<(&str, &str)> {
+fn split_virtual_epub_path(path: &str) -> Option<(&str, &str)> {
     if path.starts_with('/') {
         return None;
     }
@@ -394,7 +398,7 @@ fn ends_with_epub(path: &str) -> bool {
 
 /// MIME type for supported image extensions (case-insensitive), or `None`
 /// if the path is not a supported image format.
-pub(super) fn image_mime_type(file_path: &std::path::Path) -> Option<&'static str> {
+fn image_mime_type(file_path: &std::path::Path) -> Option<&'static str> {
     let ext = file_path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
         "png" => "image/png",
@@ -409,7 +413,7 @@ pub(super) fn image_mime_type(file_path: &std::path::Path) -> Option<&'static st
     })
 }
 
-pub(super) fn truncate(s: &str, max: usize) -> Cow<'_, str> {
+fn truncate(s: &str, max: usize) -> Cow<'_, str> {
     if s.len() <= max {
         Cow::Borrowed(s)
     } else {

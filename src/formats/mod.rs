@@ -17,6 +17,7 @@ mod rust;
 mod text;
 
 #[cfg(test)]
+#[path = "tests/tests_mod.rs"]
 mod tests;
 
 /// A single heading extracted from a file.

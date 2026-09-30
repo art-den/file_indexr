@@ -1,8 +1,9 @@
-use crate::config::Config;
-use crate::index::writer::IndexWriterWrapper;
 use std::sync::Arc;
 
-use crate::search::*;
+use crate::config::Config;
+use crate::index::writer::IndexWriterWrapper;
+
+use super::*;
 
 fn make_temp_dir() -> std::path::PathBuf {
     crate::testutil::unique_temp_dir("search_test")

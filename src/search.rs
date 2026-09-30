@@ -10,6 +10,10 @@ use tracing::debug;
 
 use crate::schema::field;
 
+#[cfg(test)]
+#[path = "tests/tests_search.rs"]
+mod tests;
+
 /// Errors produced by the search subsystem.
 #[derive(Debug, Error)]
 pub enum SearchError {

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::mcp::jsonrpc::*;
+use super::*;
 
 #[test]
 fn test_parse_valid_request() {

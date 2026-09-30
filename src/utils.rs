@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "tests/tests_utils.rs"]
+mod tests;
+
 /// Truncate raw bytes to at most `max_bytes`, returning the longest valid UTF-8
 /// prefix not exceeding `max_bytes` (may be empty).
 pub fn truncate_bytes(bytes: &[u8], max_bytes: usize) -> &str {

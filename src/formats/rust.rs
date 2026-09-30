@@ -5,6 +5,10 @@ use itertools::Itertools;
 
 use crate::formats::{FileStructure, markdown};
 
+#[cfg(test)]
+#[path = "tests/tests_rust.rs"]
+mod tests;
+
 /// Kind of Rust item, used to compute final level from nesting context.
 #[derive(PartialEq, Clone, Copy)]
 enum ItemKind {
@@ -117,7 +121,7 @@ pub fn structure(text: &str) -> FileStructure {
 /// misread as an unterminated char literal for the rest of the line.
 ///
 /// Line-scoped by design: raw strings `r#"..."#` are not tracked across lines.
-pub(super) fn count_brace_delta(line: &str, in_block_comment: bool) -> (isize, bool) {
+fn count_brace_delta(line: &str, in_block_comment: bool) -> (isize, bool) {
     let mut delta: isize = 0;
     // Closing quote of the string/char literal being scanned, if any.
     let mut quote: Option<u8> = None;

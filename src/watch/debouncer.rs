@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 
 use crate::change::FileChange;
 
+#[cfg(test)]
+#[path = "tests/tests_debouncer.rs"]
+mod tests;
+
 /// Debounce `Modified` events for the same file path within a time window.
 /// Multiple events for the same path are merged into a single event.
 pub struct Debouncer {

@@ -6,8 +6,9 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::testutil::{unique_temp_dir, unique_temp_path};
-use crate::index::scanner::*;
 use crate::watch::FileChange;
+
+use super::*;
 
 /// Heap budget (bytes) for the test `IndexWriter`s.
 const TEST_WRITER_HEAP: usize = 50_000_000;

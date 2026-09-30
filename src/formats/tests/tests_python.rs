@@ -1,4 +1,4 @@
-use crate::formats::python::*;
+use super::*;
 
 #[test]
 fn test_class_top_level_is_level_1() {

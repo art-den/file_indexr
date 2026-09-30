@@ -1,4 +1,4 @@
-use crate::formats::html::*;
+use super::*;
 
 /// Encode `text` into `encoding` (no BOM is added; the BOM test builds its own payload).
 fn encode(text: &str, encoding: &'static encoding_rs::Encoding) -> Vec<u8> {

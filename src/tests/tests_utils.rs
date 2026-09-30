@@ -1,4 +1,4 @@
-use crate::utils::*;
+use super::*;
 
 #[test]
 fn test_truncate_bytes_ascii() {

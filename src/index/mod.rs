@@ -3,6 +3,7 @@ pub mod supervisor;
 pub mod writer;
 
 #[cfg(test)]
+#[path = "tests/tests_mod.rs"]
 mod tests;
 
 use anyhow::Result;

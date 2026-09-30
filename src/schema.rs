@@ -2,6 +2,10 @@ use tantivy::schema::{
     DateOptions, DateTimePrecision, FAST, INDEXED, STORED, STRING, Schema, SchemaBuilder, TEXT,
 };
 
+#[cfg(test)]
+#[path = "tests/tests_schema.rs"]
+mod tests;
+
 /// Field names in the Tantivy schema.
 pub mod field {
     pub const PATH: &str = "path";

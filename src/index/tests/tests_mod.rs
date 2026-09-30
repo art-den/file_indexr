@@ -1,5 +1,6 @@
-use crate::index::*;
 use crate::search::{SearchParams, search};
+
+use super::*;
 
 fn make_temp_dir(tag: &str) -> std::path::PathBuf {
     crate::testutil::unique_temp_dir(&format!("rescan_test_{tag}"))

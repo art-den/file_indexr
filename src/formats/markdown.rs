@@ -1,5 +1,9 @@
 use super::{FileStructure, HeadingItem};
 
+#[cfg(test)]
+#[path = "tests/tests_markdown.rs"]
+mod tests;
+
 pub fn structure(text: &str) -> FileStructure {
     let mut raw_headings = Vec::new();
     let mut in_code_block = false;

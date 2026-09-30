@@ -3,6 +3,10 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+#[cfg(test)]
+#[path = "tests/tests_rst.rs"]
+mod tests;
+
 /// Punctuation characters allowed for section title underlines/overlines.
 const UNDERLINE: &[char] = &[
     '=', '-', '`', ':', '"', '~', '^', '_', '*', '#', '+', '/', '\\', '|', '.', '%', '?', '!',

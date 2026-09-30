@@ -2,6 +2,10 @@ use clap::Parser;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+#[path = "tests/tests_config.rs"]
+mod tests;
+
 /// Validation result for a user-provided path.
 pub enum PathValidateResult {
     /// The path is valid and resolves within the watched directory.
@@ -13,11 +17,11 @@ pub enum PathValidateResult {
 }
 
 /// Default values
-pub (super) const DEFAULT_PORT: u16 = 8080;
-pub (super) const DEFAULT_BIND: &str = "127.0.0.1";
-pub (super) const DEFAULT_MAX_FILE_SIZE_MB: u64 = 20;
-pub (super) const DEFAULT_BATCH_SIZE: usize = 500;
-pub (super) const DEFAULT_BATCH_TIMEOUT_MS: u64 = 1000;
+const DEFAULT_PORT: u16 = 8080;
+const DEFAULT_BIND: &str = "127.0.0.1";
+const DEFAULT_MAX_FILE_SIZE_MB: u64 = 20;
+const DEFAULT_BATCH_SIZE: usize = 500;
+const DEFAULT_BATCH_TIMEOUT_MS: u64 = 1000;
 
 /// MCP transport mode.
 #[derive(Debug)]
@@ -123,7 +127,7 @@ pub async fn load_config_file(path: &Path) -> Result<ConfigFile, String> {
 /// clap splits `--allowed-extensions` on commas without trimming, so
 /// `"md, txt"` would otherwise yield a literal `" txt"` that never matches
 /// `Path::extension()` and would silently skip indexing `.txt` files.
-pub (super) fn normalize_extensions(raw: Vec<String>) -> Vec<String> {
+fn normalize_extensions(raw: Vec<String>) -> Vec<String> {
     // The list is short, so a linear scan is fine and avoids both a
     // per-entry clone and a HashSet allocation.
     let mut out = Vec::new();

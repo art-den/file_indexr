@@ -2,7 +2,8 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::formats::{FileFormat, FileTextData};
-use crate::formats::epub::*;
+
+use super::*;
 
 fn image_test_epub(dir: &Path, name: &str, entries: &[(&str, Vec<u8>)]) -> std::path::PathBuf {
     let path = dir.join(name);

@@ -12,14 +12,18 @@ use crate::config::Config;
 use crate::index::IndexCoordinator;
 use crate::index::writer::IndexWriterWrapper;
 
+#[cfg(test)]
+#[path = "tests/tests_supervisor.rs"]
+mod tests;
+
 /// Maximum number of watcher start attempts before giving up.
 const MAX_WATCHER_RETRIES: u32 = 7;
 /// Upper bound for the exponential backoff between watcher restarts.
-pub (super) const MAX_WATCHER_RETRY_DELAY_SECS: u64 = 300;
+const MAX_WATCHER_RETRY_DELAY_SECS: u64 = 300;
 
 /// Backoff delay before the given (1-based) watcher start attempt:
 /// `5 << (attempt - 1)` seconds, capped at `MAX_WATCHER_RETRY_DELAY_SECS`.
-pub (super) fn backoff_delay(attempt: u32) -> Duration {
+fn backoff_delay(attempt: u32) -> Duration {
     // 5 << 6 = 320 s already exceeds the cap, so any larger shift can only
     // produce the capped value.
     let shift = u32::min(u32::saturating_sub(attempt, 1), 6);

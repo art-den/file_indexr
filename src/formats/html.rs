@@ -5,6 +5,10 @@ use std::sync::LazyLock;
 use html_to_markdown_rs::ConversionOptions;
 use regex::bytes::Regex;
 
+#[cfg(test)]
+#[path = "tests/tests_html.rs"]
+mod tests;
+
 /// Maximum number of leading bytes inspected when sniffing a declared charset,
 /// as prescribed by the WHATWG encoding specification.
 const CHARSET_SNIFF_LIMIT: usize = 1024;

@@ -1,4 +1,4 @@
-use crate::watch::*;
+use super::*;
 
 /// Non-existent index dir for tests that use fixed `/tmp` paths — none of
 /// the fixture paths below are skipped with this context.

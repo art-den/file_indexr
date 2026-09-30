@@ -10,9 +10,13 @@ use tracing::{info, warn};
 use crate::change::FileChange;
 use crate::config::Config;
 
+#[cfg(test)]
+#[path = "tests/tests_scanner.rs"]
+mod tests;
+
 /// Decode a term key from Tantivy's FST for a STRING field.
 /// The FST key stores raw UTF-8 bytes without a type tag prefix.
-pub(super) fn decode_term_key(key: &[u8]) -> Option<&str> {
+fn decode_term_key(key: &[u8]) -> Option<&str> {
     if key.is_empty() {
         return None;
     }
@@ -20,7 +24,7 @@ pub(super) fn decode_term_key(key: &[u8]) -> Option<&str> {
 }
 
 /// Resolve the `path_exact` field from the schema.
-pub(super) fn resolve_path_field(schema: &Schema) -> Result<Field> {
+fn resolve_path_field(schema: &Schema) -> Result<Field> {
     schema
         .get_field(crate::schema::field::PATH_EXACT)
         .map_err(|e| anyhow::anyhow!("path_exact field not found in schema: {}", e))
@@ -34,7 +38,7 @@ pub(super) fn resolve_path_field(schema: &Schema) -> Result<Field> {
 /// (possible before a merge), the MAX mtime is returned — it reflects the latest
 /// indexing of the file. A missing fast-field column or value is also `Ok(None)`:
 /// "cannot verify" must fail in the reindex direction.
-pub(super) fn indexed_mtime_in_index(
+fn indexed_mtime_in_index(
     segments: &[SegmentReader],
     path_field: Field,
     rel_path: &str,
@@ -98,7 +102,7 @@ fn indexed_mtime_in_segment(
 /// failure can never wipe the index. The term stream contains phantom
 /// terms of deleted docs (no alive-bitset filtering) — harmless: emitting
 /// `Deleted` for an already removed path is an idempotent no-op.
-pub(super) fn detect_deletions_from_index(
+fn detect_deletions_from_index(
     segments: &[SegmentReader],
     field: Field,
     directory: &Path,
@@ -154,7 +158,7 @@ pub(super) fn detect_deletions_from_index(
 /// mtime on disk is strictly newer than the mtime stored in the index. Any missing data
 /// (stat failure, unreadable mtime, out-of-range timestamp) means "reindex" — the safe
 /// direction is over-indexing.
-pub(super) async fn needs_indexing(
+async fn needs_indexing(
     path: &Path,
     segments: &[SegmentReader],
     path_field: Field,
@@ -183,7 +187,7 @@ pub(super) async fn needs_indexing(
 /// each `read_dir` so the tokio runtime can schedule other tasks.
 /// A `read_dir` failure at any recursion level returns `Err` and fails the
 /// whole scan: an unreadable directory must not look like an empty one.
-pub(super) async fn walk_directory(
+async fn walk_directory(
     dir: &Path,
     base_canonical: &Path,
     config: &Config,

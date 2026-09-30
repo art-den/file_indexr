@@ -1,4 +1,4 @@
-use crate::formats::rust::*;
+use super::*;
 
 #[test]
 fn test_free_function_is_level_2() {

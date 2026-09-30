@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::mcp::tools::*;
+use super::*;
 
 #[test]
 fn test_tools_list_returns_three_tools() {

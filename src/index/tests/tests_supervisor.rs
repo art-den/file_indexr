@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::index::supervisor::*;
+use super::*;
 
 #[test]
 fn test_backoff_delay_sequence() {

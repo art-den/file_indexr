@@ -7,6 +7,10 @@ use regex::Regex;
 use tracing::warn;
 use zip::ZipArchive;
 
+#[cfg(test)]
+#[path = "tests/tests_epub.rs"]
+mod tests;
+
 /// Location of the OPC container descriptor inside an EPUB archive.
 const CONTAINER_PATH: &str = "META-INF/container.xml";
 

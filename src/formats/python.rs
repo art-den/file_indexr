@@ -1,5 +1,9 @@
 use crate::formats::{FileStructure, markdown};
 
+#[cfg(test)]
+#[path = "tests/tests_python.rs"]
+mod tests;
+
 /// Kind of Python heading, used to compute final level from indentation depth.
 #[derive(PartialEq)]
 enum HeadingKind {

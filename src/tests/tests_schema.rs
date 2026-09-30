@@ -1,4 +1,4 @@
-use crate::schema::*;
+use super::*;
 
 #[test]
 fn test_schema_fields_exist() {

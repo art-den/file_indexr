@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg(test)]
+#[path = "tests/tests_jsonrpc.rs"]
+mod tests;
+
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {

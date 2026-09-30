@@ -1,6 +1,7 @@
 pub mod debouncer;
 
 #[cfg(test)]
+#[path = "tests/tests_mod.rs"]
 mod tests;
 
 use anyhow::Result;

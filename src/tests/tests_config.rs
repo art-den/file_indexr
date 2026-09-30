@@ -1,8 +1,9 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::config::*;
 use crate::testutil;
+
+use super::*;
 
 fn make_temp_config(content: &str) -> std::path::PathBuf {
     let path = testutil::unique_temp_dir("test").join("config.toml");

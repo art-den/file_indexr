@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::{Duration, Instant}};
 
-use crate::watch::{FileChange, debouncer::*};
+use super::*;
 
 #[test]
 fn test_debouncer_single_event() {

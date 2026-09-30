@@ -1,4 +1,4 @@
-use crate::formats::*;
+use super::*;
 
 fn make_temp_dir() -> PathBuf {
     crate::testutil::unique_temp_dir("formats_test")
