@@ -346,3 +346,113 @@ async fn test_startup_scan_reindexes_modified_file_after_restart() {
         assert_eq!(original_total, 0, "stale content must be gone");
     }
 }
+
+#[tokio::test]
+async fn test_startup_scan_removes_deleted_file_after_restart() {
+    // A file that was indexed and then deleted while the app was offline
+    // must be removed from the index on the next startup: the scan detects
+    // its absence from the filesystem via the indexed path terms.
+    let watch_dir = make_temp_dir();
+    let index_dir = make_temp_dir();
+    let config = Arc::new(make_config(&watch_dir, &index_dir));
+
+    let keep_path = watch_dir.join("keep.txt");
+    let remove_path = watch_dir.join("remove.txt");
+    std::fs::write(&keep_path, "keep me after restart").unwrap();
+    std::fs::write(&remove_path, "delete me before restart").unwrap();
+
+    // First run — index both files
+    {
+        let coordinator =
+            IndexCoordinator::new(config.clone(), file_indexr::formats::new_text_data_cache())
+                .await
+                .unwrap();
+        let count = coordinator.startup_scan().await.unwrap();
+        assert_eq!(count, 2);
+
+        // Precondition: the removed file must actually be in the index
+        // (committed), so the second scan's deletion decision comes from the
+        // indexed path terms, not from the absence of the document itself.
+        let reader = coordinator.writer().index().reader().unwrap();
+        let cache = coordinator.writer().text_data_cache();
+        let delete_total = file_indexr::search::search(
+            &reader,
+            file_indexr::search::SearchParams {
+                q: "delete".to_string(),
+                ..Default::default()
+            },
+            &config.directory,
+            cache,
+            false,
+        )
+        .await
+        .unwrap()
+        .total;
+        assert_eq!(delete_total, 1, "first run must index remove.txt");
+    }
+
+    // Delete one file while the app is offline
+    std::fs::remove_file(&remove_path).unwrap();
+
+    // Second startup — the deleted file must be removed from the index
+    {
+        let coordinator =
+            IndexCoordinator::new(config.clone(), file_indexr::formats::new_text_data_cache())
+                .await
+                .unwrap();
+        let count = coordinator.startup_scan().await.unwrap();
+        assert_eq!(
+            count, 0,
+            "No files to (re)index: keep.txt is unchanged, remove.txt is gone"
+        );
+
+        // Only the survivor remains in the index.
+        let reader = coordinator.writer().index().reader().unwrap();
+        let searcher = reader.searcher();
+        let results: Vec<_> = searcher
+            .search(
+                &tantivy::query::AllQuery {},
+                &tantivy::collector::TopDocs::with_limit(10).order_by_score(),
+            )
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "deleted document must be gone from the index"
+        );
+
+        let cache = coordinator.writer().text_data_cache();
+        let delete_total = file_indexr::search::search(
+            &reader,
+            file_indexr::search::SearchParams {
+                q: "delete".to_string(),
+                ..Default::default()
+            },
+            &config.directory,
+            cache,
+            false,
+        )
+        .await
+        .unwrap()
+        .total;
+        assert_eq!(
+            delete_total, 0,
+            "content of the deleted file must be unsearchable"
+        );
+
+        let keep_total = file_indexr::search::search(
+            &reader,
+            file_indexr::search::SearchParams {
+                q: "keep".to_string(),
+                ..Default::default()
+            },
+            &config.directory,
+            cache,
+            false,
+        )
+        .await
+        .unwrap()
+        .total;
+        assert_eq!(keep_total, 1, "surviving file must stay indexed");
+    }
+}
