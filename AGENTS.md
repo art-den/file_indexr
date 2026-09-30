@@ -14,7 +14,7 @@ Single-user — no auth, RBAC, or shared indexes.
 
 ## Testing
 
-- Unit-tests are placed into `tests/tests_*.rs` files to avoid cluttering the code of the main modules. Use `pub (super)` to make private elements accessible to unit tests.
+- Unit-tests are placed into `tests/tests_*.rs` files to avoid cluttering the code of the main modules.
 - Temp dirs come from `file_indexr::testutil` (pid + atomic counter) — unique per test, run in parallel, do NOT clean up. `unique_temp_dir` enforces freshness with `create_dir` + retry on `AlreadyExists`: the OS recycles pids, so `create_dir_all` could silently reuse a dir left over from a previous run. Never rely on `create_dir_all` for unique test paths.
 - Always commit before searching in tests (`writer.commit().await` / `commit().unwrap()`).
 - HTTP endpoint tests use `tower::Service` — no real server needed.
