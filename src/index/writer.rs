@@ -222,7 +222,6 @@ fn requeue_failed(mut failed: Vec<ChangeItem>) -> Vec<ChangeItem> {
 pub struct IndexWriterWrapper {
     inner: Arc<SyncMutex<IndexWriter>>,
     index: Arc<Index>,
-    reader: tantivy::IndexReader,
     schema: Schema,
     config: Arc<Config>,
     buffer: Mutex<Vec<ChangeItem>>,
@@ -254,10 +253,6 @@ impl IndexWriterWrapper {
         // Use 50MB heap for the index writer
         let inner = index.writer(50_000_000)?;
 
-        let reader = index
-            .reader()
-            .map_err(|e| anyhow::anyhow!("Failed to create index reader: {}", e))?;
-
         let batch_size = config.batch_size;
         let base_canonical = tokio::fs::canonicalize(&config.directory)
             .await
@@ -265,7 +260,6 @@ impl IndexWriterWrapper {
         Ok(Self {
             inner: Arc::new(SyncMutex::new(inner)),
             index: Arc::new(index),
-            reader,
             schema,
             config,
             buffer: Mutex::new(Vec::new()),
@@ -562,12 +556,5 @@ impl IndexWriterWrapper {
     pub async fn buffer_len(&self) -> usize {
         let buffer = self.buffer.lock().await;
         buffer.len()
-    }
-
-    /// Count documents in the index.
-    pub fn doc_count(&self) -> Result<u64> {
-        self.reader.reload()?;
-        let searcher = self.reader.searcher();
-        Ok(searcher.num_docs())
     }
 }

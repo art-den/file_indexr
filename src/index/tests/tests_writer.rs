@@ -109,7 +109,9 @@ async fn test_commit_task_panic_requeues_batch() {
     // The follow-up clean commit applies the requeued batch.
     assert!(writer.commit().await);
     assert_eq!(writer.buffer_len().await, 0);
-    assert_eq!(writer.doc_count().unwrap(), 3);
+    // A fresh reader reflects the latest committed state (commit awaited above).
+    let reader = writer.index().reader().unwrap();
+    assert_eq!(reader.searcher().num_docs(), 3);
 }
 
 #[tokio::test]

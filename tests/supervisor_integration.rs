@@ -102,10 +102,13 @@ async fn test_file_change_is_indexed_and_shutdown_is_clean() {
 
     // The watcher debounces for 1 s and the batch commit fires on a 1 s
     // timer, so the doc is visible only after both — allow plenty of time.
+    // A single reader is reloaded on every poll to pick up new commits.
+    let reader = writer.index().reader().unwrap();
     let deadline = tokio::time::sleep(Duration::from_secs(30));
     tokio::pin!(deadline);
     loop {
-        if writer.doc_count().unwrap() > 0 {
+        reader.reload().unwrap();
+        if reader.searcher().num_docs() > 0 {
             break;
         }
         tokio::select! {
