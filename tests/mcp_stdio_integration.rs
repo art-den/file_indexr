@@ -23,7 +23,8 @@ const RESPONSE_TIMEOUT_SECS: u64 = 15;
 const READY_TIMEOUT_SECS: u64 = 30;
 // How long to wait for the child to exit after a client disconnect.
 // The exit requires a multi-step chain (EPIPE on the response write → STDIO
-// loop exit → watcher shutdown → final commit → process exit), and every
+// loop exit → watcher shutdown → final commit → startup-scan drain
+// (bounded) → process exit), and every
 // step needs the child to be scheduled — so this must be as generous as
 // RESPONSE_TIMEOUT_SECS, not a tight 5s.
 const EXIT_TIMEOUT_SECS: u64 = 15;
@@ -277,6 +278,33 @@ impl StdioSession {
                     "STDIO server did not become ready within {}s",
                     READY_TIMEOUT_SECS
                 );
+            }
+            std::thread::sleep(Duration::from_millis(INIT_RETRY_INTERVAL_MS));
+        }
+    }
+
+    /// Send a request repeatedly until `pred` accepts the response or the
+    /// deadline is reached.
+    ///
+    /// The background startup scan may still be running when the server
+    /// becomes ready, so a search issued immediately can legitimately miss
+    /// files that are not indexed yet.
+    fn send_req_until(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        mut pred: impl FnMut(&Value) -> bool,
+    ) -> Option<Value> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(resp) = self.send_req(method, params.clone())
+                && pred(&resp)
+            {
+                return Some(resp);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
             }
             std::thread::sleep(Duration::from_millis(INIT_RETRY_INTERVAL_MS));
         }
@@ -560,11 +588,17 @@ fn test_stdio_tools_call_docs_search() {
     let mut session = StdioSession::spawn(watch_dir);
     session.ensure_ready();
 
-    let resp = session.send_req(
+    let resp = session.send_req_until(
         "tools/call",
         serde_json::json!({"name": "docs_search", "arguments": {"query": "Hello"}}),
+        Duration::from_secs(READY_TIMEOUT_SECS),
+        |resp| {
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("hello.txt"))
+        },
     );
-    assert!(resp.is_some());
+    assert!(resp.is_some(), "expected hello.txt in search results");
 
     let content = &resp.unwrap()["result"]["content"][0];
     assert_eq!(content["type"], "text");

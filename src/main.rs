@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -7,7 +7,13 @@ use file_indexr::config::{self, Args, TransportMode};
 use file_indexr::index::{IndexCoordinator, writer::IndexWriterWrapper};
 use file_indexr::{AppState, api};
 use tokio::sync::watch;
-use tracing::{error, info};
+
+/// Upper bound for waiting on the background startup scan after shutdown.
+/// Exiting mid-scan is safe: unapplied changes keep a stale stored mtime and
+/// are re-applied on the next start, so the wait is best-effort durability,
+/// not a correctness requirement.
+const SCAN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -59,17 +65,19 @@ async fn main() -> Result<()> {
             .await?,
     );
 
-    // 5. Run startup scan via coordinator
+    // 5. Run the startup scan in the background so the transport can start
+    //    immediately: the index from a previous run is already searchable,
+    //    and per-file mtime comparison re-applies anything the scan misses,
+    //    so a failed scan never needs to kill the service.
     let coordinator = IndexCoordinator::with_writer(writer.clone(), config.clone());
+    let scan_task = tokio::spawn(async move {
+        let start_time = Instant::now();
+        let files = coordinator.startup_scan().await?;
+        info!(files, elapsed = ?start_time.elapsed(), "Initial scan complete");
+        Ok::<_, anyhow::Error>(files)
+    });
 
-    // 6. Build shared application state for the HTTP server
-    let start_time = Instant::now();
-    let count = coordinator
-        .startup_scan()
-        .await
-        .context("Startup scan failed")?;
-    info!(files = count, elapsed = ?start_time.elapsed(), "Initial scan complete");
-
+    // 6. Build shared application state
     let reader = writer
         .index()
         .reader()
@@ -84,15 +92,18 @@ async fn main() -> Result<()> {
 
     // 7. Launch based on transport mode
     match transport {
-        TransportMode::Http => run_http_server(app_state).await?,
-        TransportMode::Stdio => run_stdio_mode(app_state).await?,
+        TransportMode::Http => run_http_server(app_state, scan_task).await?,
+        TransportMode::Stdio => run_stdio_mode(app_state, scan_task).await?,
     }
 
     info!("FileIndexr stopped");
     Ok(())
 }
 
-async fn run_http_server(app_state: AppState) -> Result<()> {
+async fn run_http_server(
+    app_state: AppState,
+    scan_task: tokio::task::JoinHandle<Result<u64>>,
+) -> Result<()> {
     let (watcher_shutdown_tx, mut watcher_done_rx, watcher_task) =
         spawn_watcher(app_state.config.clone(), app_state.writer.clone());
 
@@ -123,11 +134,12 @@ async fn run_http_server(app_state: AppState) -> Result<()> {
     }
 
     stop_watcher(watcher_shutdown_tx, watcher_task).await;
+    await_startup_scan(scan_task).await;
 
     Ok(())
 }
 
-async fn run_stdio_mode(state: AppState) -> Result<()> {
+async fn run_stdio_mode(state: AppState, scan_task: tokio::task::JoinHandle<Result<u64>>) -> Result<()> {
     use file_indexr::mcp::stdio::run_stdio_loop;
 
     let (watcher_shutdown_tx, mut watcher_done_rx, watcher_task) =
@@ -165,8 +177,25 @@ async fn run_stdio_mode(state: AppState) -> Result<()> {
     };
 
     stop_watcher(watcher_shutdown_tx, watcher_task).await;
+    await_startup_scan(scan_task).await;
 
     loop_result
+}
+
+/// Wait for the background startup scan to finish after the transport has
+/// stopped, bounded by `SCAN_DRAIN_TIMEOUT` so a long scan never blocks
+/// shutdown. Scan failures are already logged by the scan itself; only a task
+/// panic is reported here. An abandoned scan is harmless: its unapplied
+/// changes keep a stale stored mtime and are re-applied on the next start.
+async fn await_startup_scan(task: tokio::task::JoinHandle<Result<u64>>) {
+    match tokio::time::timeout(SCAN_DRAIN_TIMEOUT, task).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => error!(error = %e, "Startup scan task panicked"),
+        Err(_) => warn!(
+            timeout_secs = SCAN_DRAIN_TIMEOUT.as_secs(),
+            "Startup scan still running after shutdown — abandoning it; the next start re-applies its missed changes"
+        ),
+    }
 }
 
 /// Spawn the file-watcher supervisor and return its shutdown sender,
