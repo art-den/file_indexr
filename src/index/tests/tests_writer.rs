@@ -36,6 +36,14 @@ fn test_chrono_to_tantivy_conversion() {
     let tantivy_dt = chrono_to_tantivy(chrono_dt);
     let ts = tantivy_dt.into_timestamp_secs();
     assert_eq!(ts, chrono_ts);
+
+    // Nanosecond round-trip must be exact (the scanner relies on equality).
+    let chrono_ns_dt = chrono::DateTime::from_timestamp(1_700_000_000, 123_456_789).unwrap();
+    let tantivy_ns_dt = chrono_to_tantivy(chrono_ns_dt);
+    assert_eq!(
+        tantivy_ns_dt.into_timestamp_nanos(),
+        1_700_000_000_123_456_789
+    );
 }
 
 #[test]

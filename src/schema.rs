@@ -1,4 +1,6 @@
-use tantivy::schema::{DateOptions, FAST, INDEXED, STORED, STRING, Schema, SchemaBuilder, TEXT};
+use tantivy::schema::{
+    DateOptions, DateTimePrecision, FAST, INDEXED, STORED, STRING, Schema, SchemaBuilder, TEXT,
+};
 
 /// Field names in the Tantivy schema.
 pub mod field {
@@ -26,7 +28,10 @@ pub fn build_schema() -> Schema {
     schema_builder.add_u64_field(field::SIZE, INDEXED | STORED | FAST);
     schema_builder.add_date_field(
         field::MODIFIED,
-        DateOptions::default().set_indexed().set_fast(),
+        DateOptions::default()
+            .set_indexed()
+            .set_fast()
+            .set_precision(DateTimePrecision::Nanoseconds),
     );
     schema_builder.add_text_field(field::EXTENSION, STRING | STORED);
     schema_builder.add_bool_field(field::HAS_CONTENT, STORED);

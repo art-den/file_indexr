@@ -212,9 +212,6 @@ async fn test_startup_scan_indexes_new_folder_after_restart() {
         assert_eq!(count, 1);
     }
 
-    // Wait for filesystem timestamps to separate from checkpoint time
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
     // Simulate app restart: new folder appears while app was offline
     let new_folder = watch_dir.join("new_docs");
     std::fs::create_dir_all(&new_folder).unwrap();
@@ -240,5 +237,112 @@ async fn test_startup_scan_indexes_new_folder_after_restart() {
             )
             .unwrap();
         assert_eq!(results.len(), 3, "Expected 3 total documents in index");
+    }
+}
+
+#[tokio::test]
+async fn test_startup_scan_reindexes_modified_file_after_restart() {
+    // The headline per-file behavior: a file that already exists in the index
+    // and whose mtime became strictly newer before a restart must be
+    // re-indexed — not skipped and not duplicated. The mtime is set to a fixed
+    // future value (deterministic, no sleeps).
+    let watch_dir = make_temp_dir();
+    let index_dir = make_temp_dir();
+    let config = Arc::new(make_config(&watch_dir, &index_dir));
+
+    let path = watch_dir.join("existing.txt");
+    std::fs::write(&path, "existing file original content").unwrap();
+
+    // First run — index the file
+    {
+        let coordinator =
+            IndexCoordinator::new(config.clone(), file_indexr::formats::new_text_data_cache())
+                .await
+                .unwrap();
+        let count = coordinator.startup_scan().await.unwrap();
+        assert_eq!(count, 1);
+
+        // Precondition: the file must actually be in the index (committed),
+        // so the second scan's re-index decision comes from the per-file mtime
+        // comparison, not from absence detection.
+        let reader = coordinator.writer().index().reader().unwrap();
+        let cache = coordinator.writer().text_data_cache();
+        let original_total = file_indexr::search::search(
+            &reader,
+            file_indexr::search::SearchParams {
+                q: "original".to_string(),
+                ..Default::default()
+            },
+            &config.directory,
+            cache,
+            false,
+        )
+        .await
+        .unwrap()
+        .total;
+        assert_eq!(original_total, 1, "first run must index the file");
+    }
+
+    // Modify the file while the app is offline and make its mtime strictly
+    // newer than the stored one (filetime converts via SystemTime).
+    std::fs::write(&path, "existing file updated zebra content").unwrap();
+    let future: std::time::SystemTime =
+        (chrono::Utc::now() + chrono::Duration::minutes(1)).into();
+    filetime::set_file_mtime(&path, future.into()).unwrap();
+
+    // Second startup — the modified file must be re-indexed
+    {
+        let coordinator =
+            IndexCoordinator::new(config.clone(), file_indexr::formats::new_text_data_cache())
+                .await
+                .unwrap();
+        let count = coordinator.startup_scan().await.unwrap();
+        assert_eq!(
+            count, 1,
+            "Modified file with a newer mtime must be re-indexed"
+        );
+
+        // Re-indexed in place: still exactly one document (Delete-then-Add).
+        let reader = coordinator.writer().index().reader().unwrap();
+        let searcher = reader.searcher();
+        let results: Vec<_> = searcher
+            .search(
+                &tantivy::query::AllQuery {},
+                &tantivy::collector::TopDocs::with_limit(10).order_by_score(),
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1, "Expected 1 document after reindex (no duplicate)");
+
+        // The new content is what is stored; the stale content is gone.
+        let cache = coordinator.writer().text_data_cache();
+        let zebra_total = file_indexr::search::search(
+            &reader,
+            file_indexr::search::SearchParams {
+                q: "zebra".to_string(),
+                ..Default::default()
+            },
+            &config.directory,
+            cache,
+            false,
+        )
+        .await
+        .unwrap()
+        .total;
+        assert_eq!(zebra_total, 1, "new content must be searchable");
+
+        let original_total = file_indexr::search::search(
+            &reader,
+            file_indexr::search::SearchParams {
+                q: "original".to_string(),
+                ..Default::default()
+            },
+            &config.directory,
+            cache,
+            false,
+        )
+        .await
+        .unwrap()
+        .total;
+        assert_eq!(original_total, 0, "stale content must be gone");
     }
 }

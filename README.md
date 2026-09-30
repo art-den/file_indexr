@@ -12,7 +12,7 @@ An AI agent in a browser or sandbox can call `fetch()`, but cannot walk your fil
 
 - **Indexes on startup**: Scans the target directory and builds a full-text search index using [Tantivy](https://github.com/quickwit-oss/tantivy) (Rust equivalent of Lucene).
 - **Stays in sync**: Watches the directory for changes — new files, modifications, deletions — and updates the index in real time. If the kernel drops file events (inotify queue overflow during bulk operations), the gap is detected and an automatic rescan recovers the missed changes.
-- **Resumes intelligently**: On restart, only re-indexes files that changed since the last run (mtime-based; checkpoint persisted on disk).
+- **Resumes intelligently**: On restart, only re-indexes files that changed since the last run (per-file mtime comparison against the mtime stored in the index).
 - **Answers queries via MCP**: Model Context Protocol tools for searching, reading files, and browsing structure.
 
 ## Quick start

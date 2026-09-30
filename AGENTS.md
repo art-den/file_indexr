@@ -7,7 +7,7 @@ Single-user — no auth, RBAC, or shared indexes.
 
 - **Never write debug output to `stdout`** — the STDIO MCP transport writes JSON-RPC responses to stdout, so any `println!`/`dbg!` corrupts the protocol. Log via `tracing` (stderr) only.
 - File content is indexed for search but **NOT stored** in Tantivy documents — it is read from disk at search time via `src/formats/`. Don't add `STORED` to the content field.
-- Transient filesystem errors must never wipe the index: deletion detection counts only `ErrorKind::NotFound`, and scan/commit failures block checkpoint advancement so the next start re-applies missed changes via the mtime filter.
+- Transient filesystem errors must never wipe the index: deletion detection counts only `ErrorKind::NotFound`, and a failed scan/commit simply leaves stale stored mtimes in the index, so the next start re-applies the missed changes (per-file mtime comparison against the indexed value).
 - Tantivy: `IndexWriter` holds an exclusive lock — drop it before creating a new one on the same path; explicit `.commit()` is required for search visibility.
 - Search snippets use `StreamExt::buffered`, which preserves result order — do not replace with `buffer_unordered`.
 - Virtual EPUB image paths in `docs_get` (`<book.epub>/<inner>`): only the outer EPUB file goes through `validate_path`. The inner part is an opaque zip-entry lookup (literal name, else unique suffix match) that cannot escape the archive — do not run it through filesystem operations.

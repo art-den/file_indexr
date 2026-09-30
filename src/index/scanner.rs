@@ -1,16 +1,14 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::sync::Arc;
 use tantivy::schema::{Field, IndexRecordOption, Schema};
-use tantivy::{Index, SegmentReader, Term};
+use tantivy::{DocSet, Index, SegmentReader, Term, TERMINATED};
 use tokio::fs;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::change::FileChange;
 use crate::config::Config;
-use crate::index::checkpoint::load_checkpoint;
 
 /// Decode a term key from Tantivy's FST for a STRING field.
 /// The FST key stores raw UTF-8 bytes without a type tag prefix.
@@ -28,37 +26,66 @@ pub(super) fn resolve_path_field(schema: &Schema) -> Result<Field> {
         .map_err(|e| anyhow::anyhow!("path_exact field not found in schema: {}", e))
 }
 
-/// Check if a relative path exists in the segment by constructing a Term
-/// and probing the segment's term dictionary. O(log N) per call via FST.
+/// Look up the mtime (UNIX nanoseconds) stored in the index for `rel_path`.
 ///
-/// The term dictionary is immutable and only rebuilt on merge, so it can
-/// contain "phantom" terms for documents that have since been deleted —
-/// deletions live in the segment's alive bitset, not in the FST. When the
-/// term is present, confirm at least one alive document still carries it.
-/// `path_exact` is a single-token STRING field, so the posting list holds
-/// at most a couple of docs per segment and `doc_freq_given_deletes`
-/// (clone + scan) is cheap here.
-fn path_in_segment(segment: &SegmentReader, field: Field, rel_path: &str) -> Result<bool> {
-    let term = Term::from_field_text(field, rel_path);
-    let inv_index = segment.inverted_index(field)?;
-    let Some(postings) = inv_index.read_postings(&term, IndexRecordOption::Basic)? else {
-        return Ok(false);
-    };
-    Ok(match segment.alive_bitset() {
-        // No deletions in this segment: a term in the FST has at least one doc.
-        None => true,
-        Some(bitset) => postings.doc_freq_given_deletes(bitset) > 0,
-    })
+/// Returns `Ok(None)` when the path is not indexed: the term is absent from the FST, or
+/// all matching documents have been deleted (phantom terms remain in the FST until a
+/// merge; the alive bitset filters them out). When several live documents carry the term
+/// (possible before a merge), the MAX mtime is returned — it reflects the latest
+/// indexing of the file. A missing fast-field column or value is also `Ok(None)`:
+/// "cannot verify" must fail in the reindex direction.
+pub(super) fn indexed_mtime_in_index(
+    segments: &[SegmentReader],
+    path_field: Field,
+    rel_path: &str,
+) -> Result<Option<i64>> {
+    let mut max_ns: Option<i64> = None;
+    for segment in segments {
+        let Some(ns) = indexed_mtime_in_segment(segment, path_field, rel_path)? else {
+            continue;
+        };
+        max_ns = Some(i64::max(max_ns.unwrap_or(ns), ns));
+    }
+    Ok(max_ns)
 }
 
-/// Check if a relative path exists in any segment of the index.
-pub(super) fn path_exists_in_index(segments: &[SegmentReader], field: Field, rel_path: &str) -> Result<bool> {
-    for segment in segments {
-        if path_in_segment(segment, field, rel_path)? {
-            return Ok(true);
+/// Per-segment part of [`indexed_mtime_in_index`]. O(log N) FST probe plus a
+/// handful of fast-field reads (a single-token STRING term has at most a few
+/// docs per segment).
+fn indexed_mtime_in_segment(
+    segment: &SegmentReader,
+    path_field: Field,
+    rel_path: &str,
+) -> Result<Option<i64>> {
+    let term = Term::from_field_text(path_field, rel_path);
+    let inv_index = segment.inverted_index(path_field)?;
+    let Some(mut postings) = inv_index.read_postings(&term, IndexRecordOption::Basic)? else {
+        return Ok(None);
+    };
+    let Some(column) = segment
+        .fast_fields()
+        .date(crate::schema::field::MODIFIED)
+        .ok()
+    else {
+        return Ok(None);
+    };
+    let alive = segment.alive_bitset();
+    let mut max_ns: Option<i64> = None;
+    while postings.doc() != TERMINATED {
+        let doc = postings.doc();
+        let is_alive = match alive {
+            Some(bitset) => bitset.is_alive(doc),
+            None => true,
+        };
+        if is_alive {
+            if let Some(dt) = column.first(doc) {
+                let ns = dt.into_timestamp_nanos();
+                max_ns = Some(i64::max(max_ns.unwrap_or(ns), ns));
+            }
         }
+        postings.advance();
     }
-    Ok(false)
+    Ok(max_ns)
 }
 
 /// Iterate over all indexed paths via term streams and detect deletions
@@ -69,9 +96,8 @@ pub(super) fn path_exists_in_index(segments: &[SegmentReader], field: Field, rel
 /// error (EACCES, EIO, NFS failure) leaves the path in the index and is
 /// reported as a single aggregated warning, so a transient filesystem
 /// failure can never wipe the index. The term stream contains phantom
-/// terms of deleted docs (no alive-bitset filtering, unlike
-/// [`path_in_segment`]) — harmless: emitting `Deleted` for an already
-/// removed path is an idempotent no-op.
+/// terms of deleted docs (no alive-bitset filtering) — harmless: emitting
+/// `Deleted` for an already removed path is an idempotent no-op.
 pub(super) fn detect_deletions_from_index(
     segments: &[SegmentReader],
     field: Field,
@@ -124,25 +150,20 @@ pub(super) fn detect_deletions_from_index(
     Ok(deleted)
 }
 
-/// Returns true if the file needs indexing: either it's not in the index,
-/// or its mtime indicates it has been modified since the last run. The
-/// mtime (a stat syscall) is only read for files already in the index;
-/// new files are indexed unconditionally.
-async fn needs_indexing(
+/// Returns true if the file needs indexing: either its path is not in the index, or its
+/// mtime on disk is strictly newer than the mtime stored in the index. Any missing data
+/// (stat failure, unreadable mtime, out-of-range timestamp) means "reindex" — the safe
+/// direction is over-indexing.
+pub(super) async fn needs_indexing(
     path: &Path,
     segments: &[SegmentReader],
-    field: Field,
+    path_field: Field,
     rel_path: &str,
-    last_completed_at: Option<DateTime<Utc>>,
 ) -> Result<bool> {
-    // New file if not present in the index yet
-    if !path_exists_in_index(segments, field, rel_path)? {
-        return Ok(true);
-    }
-
-    // File exists in index — check mtime. Any missing data means "reindex".
-    let Some(last_completed) = last_completed_at else {
-        return Ok(true);
+    let indexed_ns = match indexed_mtime_in_index(segments, path_field, rel_path)? {
+        // Not indexed (or only phantom terms) — index unconditionally.
+        None => return Ok(true),
+        Some(ns) => ns,
     };
     let Ok(metadata) = tokio::fs::metadata(path).await else {
         return Ok(true);
@@ -150,21 +171,24 @@ async fn needs_indexing(
     let Ok(modified) = metadata.modified() else {
         return Ok(true);
     };
-    Ok(DateTime::<Utc>::from(modified) >= last_completed)
+    match chrono::DateTime::<chrono::Utc>::from(modified).timestamp_nanos_opt() {
+        // Strict `>`: equality is the normal state of an unchanged file (the writer
+        // stores the exact filesystem mtime in nanoseconds).
+        Some(fs_ns) => Ok(fs_ns > indexed_ns),
+        None => Ok(true),
+    }
 }
 
 /// Recursively walk a directory tree asynchronously, yielding control after
 /// each `read_dir` so the tokio runtime can schedule other tasks.
 /// A `read_dir` failure at any recursion level returns `Err` and fails the
-/// whole scan: an unreadable directory must not look like an empty one, the
-/// checkpoint advancement logic relies on this.
+/// whole scan: an unreadable directory must not look like an empty one.
 pub(super) async fn walk_directory(
     dir: &Path,
     base_canonical: &Path,
     config: &Config,
     segments: &[SegmentReader],
     field: Field,
-    last_completed_at: Option<DateTime<Utc>>,
     tx: &mpsc::Sender<FileChange>,
 ) -> Result<(u64, u64)> {
     let base = config.directory.as_path();
@@ -179,9 +203,9 @@ pub(super) async fn walk_directory(
     loop {
         // next_entry() returns Result<Option<DirEntry>, io::Error>: Ok(None) is
         // the normal end, but a mid-iteration Err must fail the whole scan,
-        // not silently truncate it: the rest of the directory would be skipped
-        // while the checkpoint still advanced, leaving those files with stale
-        // mtime < completed_at and never re-indexed.
+        // not silently truncate it: the failure must be surfaced and retried.
+        // Per-file mtime makes any missed files self-heal on the next start
+        // (their stored mtime stays stale).
         let entry = match entries.next_entry().await {
             Ok(None) => break,
             Ok(Some(entry)) => entry,
@@ -217,7 +241,6 @@ pub(super) async fn walk_directory(
                 config,
                 segments,
                 field,
-                last_completed_at,
                 tx,
             ))
             .await?;
@@ -259,7 +282,7 @@ pub(super) async fn walk_directory(
             Err(_) => continue,
         };
 
-        if needs_indexing(&p, segments, field, &canonical_rel, last_completed_at).await? {
+        if needs_indexing(&p, segments, field, &canonical_rel).await? {
             files_changed += 1;
             tx.send(FileChange::Modified(canonical_path))
                 .await
@@ -276,20 +299,14 @@ pub(super) async fn walk_directory(
 /// via `tokio::fs::read_dir`, yielding between directories to avoid starving
 /// the tokio worker pool:
 /// - New files: exist on disk but NOT in the index (regardless of mtime)
-/// - Modified files: exist in index with updated mtime
+/// - Modified files: exist in index with an mtime newer than the stored one
 /// - Deleted files: exist in index but NOT on disk
 pub async fn scan_directory(
     config: &Config,
     index: Arc<Index>,
     tx: mpsc::Sender<FileChange>,
 ) -> Result<u64> {
-    let checkpoint = load_checkpoint(&config.index_path)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to load checkpoint: {}", e))?;
-
-    let last_completed_at = checkpoint.map(|c| c.completed_at.unwrap_or(c.started_at));
-
-    info!(last_run = ?last_completed_at, "Starting directory scan");
+    info!("Starting directory scan");
 
     let reader = index.reader()?;
     let searcher = reader.searcher();
@@ -324,7 +341,6 @@ pub async fn scan_directory(
         config,
         &segments,
         field,
-        last_completed_at,
         &tx,
     )
     .await?;

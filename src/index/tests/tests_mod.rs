@@ -1,5 +1,4 @@
 use crate::index::*;
-use crate::index::checkpoint::{CHECKPOINT_FILENAME, load_checkpoint};
 use crate::search::{SearchParams, search};
 
 fn make_temp_dir(tag: &str) -> std::path::PathBuf {
@@ -93,46 +92,4 @@ async fn test_rescan_directory_recovers_lost_changes() {
     rescan_directory(&writer, &config).await.unwrap();
     assert_eq!(found(&reader, &watch_dir, "gamma", cache).await, 1);
     assert_eq!(found(&reader, &watch_dir, "beta", cache).await, 0);
-}
-
-/// A corrupted checkpoint file must not block the startup scan: the
-/// scan falls back to a full reindex, and the damaged file is
-/// atomically overwritten once the scan and commit succeed.
-#[tokio::test]
-async fn test_startup_scan_self_heals_corrupted_checkpoint() {
-    let watch_dir = make_temp_dir("watch");
-    let index_dir = make_temp_dir("index");
-    let config = make_config(&watch_dir, &index_dir);
-
-    std::fs::write(watch_dir.join("a.txt"), "alpha content").unwrap();
-
-    // Corrupt the checkpoint before the startup scan
-    std::fs::write(index_dir.join(CHECKPOINT_FILENAME), "not valid json {{{").unwrap();
-
-    let writer = IndexWriterWrapper::new(
-        &index_dir,
-        config.clone(),
-        crate::formats::new_text_data_cache(),
-    )
-    .await
-    .unwrap();
-    let coordinator = IndexCoordinator::with_writer(Arc::new(writer), config.clone());
-    coordinator.startup_scan().await.unwrap();
-
-    // The damaged file is replaced with a valid, completed checkpoint
-    let cp = load_checkpoint(&index_dir)
-        .await
-        .unwrap()
-        .expect("checkpoint rewritten after successful scan");
-    assert_eq!(cp.version, 1);
-    assert!(cp.completed_at.is_some());
-
-    // The full reindex ran: the file is searchable
-    let reader = coordinator.writer().index().reader().unwrap();
-    let cache = coordinator.writer().text_data_cache();
-    assert_eq!(
-        found(&reader, &watch_dir, "alpha", cache).await,
-        1,
-        "file reindexed despite corrupted checkpoint"
-    );
 }

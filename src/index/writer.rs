@@ -14,9 +14,15 @@ use tokio::sync::Mutex;
 use crate::config::Config;
 use crate::schema;
 
-/// Convert chrono DateTime to tantivy's DateTime (OffsetDateTime).
+/// Convert a chrono DateTime to tantivy's DateTime, preserving nanosecond precision.
 pub (super) fn chrono_to_tantivy(dt: chrono::DateTime<chrono::Utc>) -> tantivy::DateTime {
-    tantivy::DateTime::from_timestamp_secs(dt.timestamp())
+    // Nanosecond precision: the startup scan compares the filesystem mtime against
+    // this stored value, and equality must be exact for unchanged files.
+    match dt.timestamp_nanos_opt() {
+        Some(ns) => tantivy::DateTime::from_timestamp_nanos(ns),
+        // Outside the i64-nanos range (year ~2262): fall back to whole seconds.
+        None => tantivy::DateTime::from_timestamp_secs(dt.timestamp()),
+    }
 }
 
 /// Like `get_field`, but returns a descriptive error instead of the raw
@@ -193,9 +199,9 @@ pub (super) fn requeue_failed(mut failed: Vec<ChangeItem>) -> Vec<ChangeItem> {
         change.try_count += 1;
         if change.try_count >= MAX_RETRY_COUNT {
             // The change is lost for this session. Callers must treat a
-            // `false` return from `commit()` as "not applied" (e.g. not
-            // advancing the checkpoint), so a restart re-applies it via
-            // the mtime filter.
+            // `false` return from `commit()` as "not applied". The file
+            // keeps its stale stored mtime, so the next startup
+            // re-indexes it.
             tracing::error!(
                 change = ?change,
                 "Change dropped after {} failed commit attempts", MAX_RETRY_COUNT
@@ -395,7 +401,7 @@ impl IndexWriterWrapper {
     /// were committed. Returns `false` when the commit failed: failed
     /// changes are returned to the buffer for retry (or dropped after
     /// `MAX_RETRY_COUNT` attempts). Callers that decide what to persist
-    /// (e.g. the startup checkpoint) must treat `false` as "not applied".
+    /// must treat `false` as "not applied".
     /// Task-level failures (a panic or cancellation of the blocking task)
     /// requeue the whole batch and also return `false` — reapplying is
     /// idempotent, since `Delete`/`DeleteDir` are no-ops when nothing matches

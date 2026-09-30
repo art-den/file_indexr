@@ -1,12 +1,9 @@
-pub mod checkpoint;
 pub mod scanner;
 pub mod supervisor;
 pub mod writer;
 
 #[cfg(test)]
 mod tests;
-
-use crate::index::checkpoint::{Checkpoint, save_checkpoint};
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -61,10 +58,12 @@ impl IndexCoordinator {
         self.writer.clone()
     }
 
-    /// Run the full startup sequence: scan, commit, and save the checkpoint.
-    /// The checkpoint is only saved when the scan succeeded AND the commit fully
-    /// applied all buffered changes; otherwise the previous checkpoint is kept so
-    /// a restart re-applies the missed/unapplied changes via the mtime filter.
+    /// Run the full startup sequence: scan and commit.
+    ///
+    /// Change detection is per-file (filesystem mtime vs the mtime stored in the index),
+    /// so a failed scan or commit needs no special handling for correctness: files that
+    /// were not (re)indexed keep a stale stored mtime and are picked up again on the
+    /// next start.
     pub async fn startup_scan(&self) -> Result<u64> {
         info!("Running startup scan...");
 
@@ -72,29 +71,11 @@ impl IndexCoordinator {
         // `changed` is None if the scan failed.
         let (processed, changed) = run_scan(&self.writer, &self.config).await;
 
-        // Final commit after scan — must happen BEFORE saving checkpoint,
-        // otherwise files could be missed if crash occurs between checkpoint and commit.
-        // Unapplied changes stay buffered for the event loop to retry. Do not
-        // advance the checkpoint on failure: with the previous one intact, the
-        // mtime filter re-applies the changes on the next start. Also do not
-        // return Err, so a transient disk failure at startup does not kill
-        // the service.
-        let committed = commit_or_log(&self.writer, "Startup commit failed").await;
-
-        // Save the checkpoint only after a successful commit of a successful
-        // scan. A failed scan left some files unprobed, so advancing
-        // `completed_at` would make the mtime filter skip files modified since
-        // the previous checkpoint. Keep the old checkpoint so a restart
-        // re-scans them.
-        if committed && changed.is_some() {
-            let mut cp = Checkpoint::new_started();
-            cp.mark_completed(processed);
-            save_checkpoint(&self.config.index_path, &cp)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to save checkpoint: {}", e))?;
-        } else {
-            warn!("Checkpoint not saved; next start will re-scan changed files");
-        }
+        // Final commit after scan. A failure must not return Err, so a transient
+        // disk failure at startup does not kill the service. Unapplied changes
+        // stay buffered for the event loop to retry; the file keeps its stale
+        // stored mtime, so the next start re-indexes it.
+        commit_or_log(&self.writer, "Startup commit failed").await;
 
         let changed = changed.unwrap_or(0);
         info!(files_scanned = changed, processed, "Startup scan complete");
@@ -133,9 +114,8 @@ impl IndexCoordinator {
 
         // Final commit so buffered changes survive shutdown. A failure here must
         // not return Err, otherwise the supervisor's retry loop would restart
-        // the watcher after an explicit shutdown. The last saved checkpoint (if any)
-        // still covers these changes: the mtime filter re-applies them on the
-        // next start.
+        // the watcher after an explicit shutdown. Uncommitted changes keep a
+        // stale stored mtime in the index and are re-applied on the next start.
         commit_or_log(&self.writer, "Final commit on shutdown failed").await;
 
         // Propagate the watcher's failure so the supervisor's retry loop can
@@ -269,10 +249,10 @@ async fn process_change(
 
 /// Re-run the directory scan after an event-stream interruption (inotify
 /// queue overflow): the kernel dropped events, so the index may be missing
-/// creates/edits/deletes. The scan is mtime-based and idempotent, so it
-/// safely re-applies whatever was lost. Consecutive overflows each trigger
-/// their own scan — safe (idempotent), but scans can chain during sustained
-/// bulk operations.
+/// creates/edits/deletes. The scan compares each file's mtime with the mtime
+/// stored in the index, so it re-applies only what was lost. Consecutive
+/// overflows each trigger their own scan — safe (idempotent), but scans can
+/// chain during sustained bulk operations.
 async fn rescan_directory(writer: &IndexWriterWrapper, config: &Arc<Config>) -> Result<()> {
     warn!("Inotify queue overflow — some events were dropped; rescanning directory");
 

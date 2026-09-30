@@ -70,23 +70,34 @@ fn test_decode_term_key() {
 }
 
 #[test]
-fn test_path_in_segment_ignores_deleted_docs() {
+fn test_indexed_mtime_in_index_ignores_deleted_docs() {
     let (index, field) = temp_index();
+    let modified_field = index
+        .schema()
+        .get_field(crate::schema::field::MODIFIED)
+        .unwrap();
+    const NS: i64 = 1_700_000_000_123_456_789;
 
-    // Index a doc for "a.txt"
+    // Index a doc for "a.txt" carrying both the path and an mtime.
     {
         let mut writer = index
             .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
             .unwrap();
-        let doc = tantivy::doc! { field => "a.txt" };
+        let doc = tantivy::doc! {
+            field => "a.txt",
+            modified_field => tantivy::DateTime::from_timestamp_nanos(NS)
+        };
         writer.add_document(doc).unwrap();
         writer.commit().unwrap();
     }
 
     let reader = index.reader().unwrap();
     let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
-    assert!(path_exists_in_index(&segments, field, "a.txt").unwrap());
-    assert!(!path_exists_in_index(&segments, field, "b.txt").unwrap());
+    assert_eq!(
+        indexed_mtime_in_index(&segments, field, "a.txt").unwrap(),
+        Some(NS)
+    );
+    assert_eq!(indexed_mtime_in_index(&segments, field, "b.txt").unwrap(), None);
 
     // Delete the doc: the FST keeps the phantom term, only the alive
     // bitset marks the doc as deleted.
@@ -101,9 +112,144 @@ fn test_path_in_segment_ignores_deleted_docs() {
     let reader = index.reader().unwrap();
     let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
     // The phantom term must NOT count as indexed.
-    assert!(!path_exists_in_index(&segments, field, "a.txt").unwrap());
+    assert_eq!(indexed_mtime_in_index(&segments, field, "a.txt").unwrap(), None);
 
     // Re-adding the path (new doc in a new segment) must be found again.
+    {
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
+            .unwrap();
+        let doc = tantivy::doc! {
+            field => "a.txt",
+            modified_field => tantivy::DateTime::from_timestamp_nanos(NS)
+        };
+        writer.add_document(doc).unwrap();
+        writer.commit().unwrap();
+    }
+
+    let reader = index.reader().unwrap();
+    let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
+    assert_eq!(
+        indexed_mtime_in_index(&segments, field, "a.txt").unwrap(),
+        Some(NS)
+    );
+}
+
+#[test]
+fn test_indexed_mtime_in_index_takes_max_across_segments() {
+    let (index, field) = temp_index();
+    let modified_field = index
+        .schema()
+        .get_field(crate::schema::field::MODIFIED)
+        .unwrap();
+    const X: i64 = 1_700_000_000_123_456_789;
+
+    // Index "a.txt" with mtime X, commit (segment 1).
+    {
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
+            .unwrap();
+        let doc = tantivy::doc! {
+            field => "a.txt",
+            modified_field => tantivy::DateTime::from_timestamp_nanos(X)
+        };
+        writer.add_document(doc).unwrap();
+        writer.commit().unwrap();
+    }
+    // Index "a.txt" again with mtime X + 1, commit (segment 2).
+    {
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
+            .unwrap();
+        let doc = tantivy::doc! {
+            field => "a.txt",
+            modified_field => tantivy::DateTime::from_timestamp_nanos(X + 1)
+        };
+        writer.add_document(doc).unwrap();
+        writer.commit().unwrap();
+    }
+
+    let reader = index.reader().unwrap();
+    let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
+    // Two live docs carry the term across two segments: the MAX mtime wins.
+    assert_eq!(
+        indexed_mtime_in_index(&segments, field, "a.txt").unwrap(),
+        Some(X + 1)
+    );
+}
+
+#[tokio::test]
+async fn test_needs_indexing_mtime_comparison() {
+    let (index, field) = temp_index();
+    let modified_field = index
+        .schema()
+        .get_field(crate::schema::field::MODIFIED)
+        .unwrap();
+    const X_NS: i64 = 1_700_000_000_123_456_789;
+
+    // Empty index: the path is not indexed -> needs indexing.
+    {
+        let reader = index.reader().unwrap();
+        let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
+        assert!(needs_indexing(
+            std::path::Path::new("/nonexistent"),
+            &segments,
+            field,
+            "a.txt"
+        )
+        .await
+        .unwrap());
+    }
+
+    // Index "a.txt" with mtime exactly X_NS.
+    {
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
+            .unwrap();
+        let doc = tantivy::doc! {
+            field => "a.txt",
+            modified_field => tantivy::DateTime::from_timestamp_nanos(X_NS)
+        };
+        writer.add_document(doc).unwrap();
+        writer.commit().unwrap();
+    }
+
+    let reader = index.reader().unwrap();
+    let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
+
+    // Real file whose mtime we control precisely.
+    let dir = unique_temp_dir("needs_indexing_mtime");
+    let path = dir.join("a.txt");
+    std::fs::write(&path, "content").unwrap();
+
+    let set_mtime = |path: &std::path::Path, ns: i64| {
+        filetime::set_file_mtime(
+            path,
+            filetime::FileTime::from_unix_time(ns / 1_000_000_000, (ns % 1_000_000_000) as u32),
+        )
+        .unwrap();
+    };
+
+    // mtime == indexed mtime: unchanged -> no reindex.
+    set_mtime(&path, X_NS);
+    assert!(!needs_indexing(&path, &segments, field, "a.txt").await.unwrap());
+
+    // mtime strictly newer -> reindex.
+    set_mtime(&path, X_NS + 1);
+    assert!(needs_indexing(&path, &segments, field, "a.txt").await.unwrap());
+
+    // mtime rolled back (older than indexed) -> no reindex (strict >).
+    set_mtime(&path, X_NS - 1);
+    assert!(!needs_indexing(&path, &segments, field, "a.txt").await.unwrap());
+}
+
+#[tokio::test]
+async fn test_needs_indexing_reindexes_when_modified_value_missing() {
+    let (index, field) = temp_index();
+
+    // A doc carrying the path but NO `modified` value: the fast-field value
+    // is absent for that doc, so "cannot verify" must fail in the reindex
+    // direction (the path is treated as not indexed).
     {
         let mut writer = index
             .writer::<tantivy::TantivyDocument>(TEST_WRITER_HEAP)
@@ -115,7 +261,15 @@ fn test_path_in_segment_ignores_deleted_docs() {
 
     let reader = index.reader().unwrap();
     let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
-    assert!(path_exists_in_index(&segments, field, "a.txt").unwrap());
+    assert_eq!(indexed_mtime_in_index(&segments, field, "a.txt").unwrap(), None);
+    assert!(needs_indexing(
+        std::path::Path::new("/nonexistent"),
+        &segments,
+        field,
+        "a.txt"
+    )
+    .await
+    .unwrap());
 }
 
 #[test]
@@ -195,10 +349,10 @@ async fn test_walk_directory_fails_on_missing_directory() {
         allowed_extensions: vec![],
     };
 
-    // A nonexistent directory must fail the walk: "unreadable" has to be
-    // distinguishable from "empty" for the checkpoint logic.
+    // A nonexistent directory must fail the walk: 'unreadable' has to be
+    // distinguishable from 'empty' so a partial walk is not silently accepted.
     let missing = unique_temp_path("walk_missing");
     let (tx, _rx) = mpsc::channel::<FileChange>(16);
-    let result = walk_directory(&missing, &missing, &config, &segments, field, None, &tx).await;
+    let result = walk_directory(&missing, &missing, &config, &segments, field, &tx).await;
     assert!(result.is_err());
 }

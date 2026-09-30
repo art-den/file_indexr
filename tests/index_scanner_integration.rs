@@ -3,7 +3,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use file_indexr::config::Config;
-use file_indexr::index::checkpoint::{Checkpoint, save_checkpoint};
 use file_indexr::index::scanner::scan_directory;
 use file_indexr::index::writer::IndexWriterWrapper;
 use file_indexr::watch::FileChange;
@@ -151,17 +150,8 @@ async fn test_incremental_scan_skips_unchanged() {
         writer.commit().await;
     }
 
-    // Save checkpoint (caller's responsibility after commit)
-    {
-        let mut cp = Checkpoint::new_started();
-        cp.mark_completed(1);
-        save_checkpoint(&index_dir, &cp).await.unwrap();
-    }
-
-    // Wait for filesystem timestamps to settle
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-    // Second scan — file is unchanged, should report 0 changes
+    // Second scan — file is unchanged (stored mtime equals filesystem mtime),
+    // should report 0 changes. This is the core per-file behavior.
     {
         let (tx2, _rx2) = mpsc::channel::<FileChange>(100);
         let count2 = scan_directory(&config, writer.index(), tx2).await.unwrap();
@@ -210,13 +200,6 @@ async fn test_scan_detects_deleted_files() {
 
     // Commit so files appear in the index term dictionary
     writer.commit().await;
-
-    // Save checkpoint (caller's responsibility after commit)
-    {
-        let mut cp = Checkpoint::new_started();
-        cp.mark_completed(2);
-        save_checkpoint(&index_dir, &cp).await.unwrap();
-    }
 
     // Delete one file while "server is offline"
     std::fs::remove_file(watch_dir.join("remove.txt")).unwrap();
@@ -283,11 +266,6 @@ async fn test_scan_no_deletion_when_all_files_exist() {
             }
         }
         writer.commit().await;
-
-        // Save checkpoint (caller's responsibility after commit)
-        let mut cp = Checkpoint::new_started();
-        cp.mark_completed(1);
-        save_checkpoint(&index_dir, &cp).await.unwrap();
     }
 
     // Second scan — no files deleted
@@ -347,7 +325,7 @@ async fn test_scan_includes_dotfiles_but_skips_hidden_dirs() {
 }
 
 #[tokio::test]
-async fn test_scan_picks_up_new_folder_after_checkpoint() {
+async fn test_scan_picks_up_new_folder() {
     let watch_dir = make_temp_dir();
     let index_dir = make_temp_dir();
     let config = Arc::new(make_config(&watch_dir, &index_dir));
@@ -385,16 +363,6 @@ async fn test_scan_picks_up_new_folder_after_checkpoint() {
 
     writer.commit().await;
 
-    // Save checkpoint
-    {
-        let mut cp = Checkpoint::new_started();
-        cp.mark_completed(1);
-        save_checkpoint(&index_dir, &cp).await.unwrap();
-    }
-
-    // Wait so filesystem timestamps don't collide with checkpoint time
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
     // Simulate new folder appearing while the app was offline
     let new_folder = watch_dir.join("new_folder");
     std::fs::create_dir_all(&new_folder).unwrap();
@@ -418,8 +386,10 @@ async fn test_scan_picks_up_new_folder_after_checkpoint() {
 async fn test_scan_reindexes_deleted_then_restored_file_with_old_mtime() {
     // Regression: after a file is deleted (doc removed via alive bitset, but
     // the phantom term remains in the FST until merge) and the app restarts,
-    // a file restored from backup with an mtime older than the checkpoint
-    // must still be re-indexed — the phantom FST term must not hide it.
+    // a file restored from backup with an old mtime must still be re-indexed:
+    // no alive document remains for its `path_exact` term, so the phantom FST
+    // term must not hide it. The backdated mtime is irrelevant — files not in
+    // the index are indexed unconditionally.
     let watch_dir = make_temp_dir();
     let index_dir = make_temp_dir();
     let config = Arc::new(make_config(&watch_dir, &index_dir));
@@ -454,19 +424,11 @@ async fn test_scan_reindexes_deleted_then_restored_file_with_old_mtime() {
     }
     writer.commit().await;
 
-    // Save checkpoint (caller's responsibility after commit)
-    {
-        let mut cp = Checkpoint::new_started();
-        cp.mark_completed(1);
-        save_checkpoint(&index_dir, &cp).await.unwrap();
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
     // Live deletion (as the watcher would do), then commit
     writer.delete_file(watch_dir.join("a.txt")).await.unwrap();
     writer.commit().await;
 
-    // Restore the file from "backup" with an mtime older than the checkpoint
+    // Restore the file from "backup" with an old mtime
     std::fs::write(watch_dir.join("a.txt"), "content a restored").unwrap();
     let past = chrono::Utc::now() - chrono::Duration::minutes(5);
     let past_std: std::time::SystemTime = past.into();
@@ -487,10 +449,9 @@ async fn test_scan_reindexes_deleted_then_restored_file_with_old_mtime() {
 
 #[tokio::test]
 async fn test_scan_new_folder_files_with_backdated_mtime() {
-    // Files whose mtime is in the past (before checkpoint) — must STILL be
-    // picked up because they are NOT in the index. The scanner compares
-    // filesystem against indexed paths, so new files are detected regardless
-    // of mtime.
+    // Files whose mtime is in the past — must STILL be picked up because they
+    // are NOT in the index. The scanner compares filesystem against indexed
+    // paths, so new files are detected regardless of mtime.
     let watch_dir = make_temp_dir();
     let index_dir = make_temp_dir();
     let config = Arc::new(make_config(&watch_dir, &index_dir));
@@ -525,15 +486,7 @@ async fn test_scan_new_folder_files_with_backdated_mtime() {
     }
     writer.commit().await;
 
-    // Save checkpoint, then wait
-    {
-        let mut cp = Checkpoint::new_started();
-        cp.mark_completed(1);
-        save_checkpoint(&index_dir, &cp).await.unwrap();
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-    // Create new folder with files, but backdate their mtime to before checkpoint
+    // Create new folder with files, but backdate their mtime into the past
     let new_folder = watch_dir.join("old_stuff");
     std::fs::create_dir_all(&new_folder).unwrap();
     let file_a = new_folder.join("a.txt");
@@ -552,4 +505,62 @@ async fn test_scan_new_folder_files_with_backdated_mtime() {
     let count = scan_directory(&config, writer.index(), tx).await.unwrap();
 
     assert_eq!(count, 2, "New files detected even with backdated mtime");
+}
+
+#[tokio::test]
+async fn test_scan_reindexes_file_with_newer_mtime() {
+    // A file whose mtime became strictly newer than the stored one must be
+    // re-indexed on the next scan. Deterministic — the mtime is set to a fixed
+    // future value, no sleeps needed.
+    let watch_dir = make_temp_dir();
+    let index_dir = make_temp_dir();
+    let config = Arc::new(make_config(&watch_dir, &index_dir));
+
+    std::fs::write(watch_dir.join("a.txt"), "content a").unwrap();
+
+    let writer = Arc::new(
+        IndexWriterWrapper::new(
+            &index_dir,
+            config.clone(),
+            file_indexr::formats::new_text_data_cache(),
+        )
+        .await
+        .unwrap(),
+    );
+
+    // First scan — index the file
+    {
+        let (tx, mut rx) = mpsc::channel::<FileChange>(100);
+        let count = scan_directory(&config, writer.index(), tx).await.unwrap();
+        assert_eq!(count, 1);
+        while let Some(change) = rx.recv().await {
+            match change {
+                FileChange::Modified(path) => {
+                    writer.add_file(path).await.unwrap();
+                }
+                FileChange::Deleted(_) => {}
+                FileChange::DeletedDir(_) => {}
+                FileChange::Rescan => panic!("scan must not emit Rescan"),
+            }
+        }
+    }
+    writer.commit().await;
+
+    // Set the mtime strictly in the future (filetime converts via SystemTime).
+    let path = watch_dir.join("a.txt");
+    let future: std::time::SystemTime =
+        (chrono::Utc::now() + chrono::Duration::minutes(1)).into();
+    filetime::set_file_mtime(&path, future.into()).unwrap();
+
+    // Second scan — the file must be re-indexed (exactly 1 change).
+    let (tx, mut rx) = mpsc::channel::<FileChange>(100);
+    let count = scan_directory(&config, writer.index(), tx).await.unwrap();
+    assert_eq!(count, 1, "File with a newer mtime must be re-indexed");
+
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], FileChange::Modified(_)));
 }

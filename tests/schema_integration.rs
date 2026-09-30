@@ -231,12 +231,13 @@ async fn test_document_modified_time() {
         .unwrap()
         .as_datetime()
         .unwrap();
-    let now = tantivy::DateTime::from_timestamp_secs(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64,
-    );
-    let diff = now.into_timestamp_secs() - modified.into_timestamp_secs();
-    assert!(diff < 60);
+    // The stored mtime must round-trip exactly (nanosecond precision). The
+    // file is not modified between the two reads, so the stored value must
+    // equal the current filesystem mtime in nanoseconds.
+    let metadata = std::fs::metadata(&file_path).unwrap();
+    let fs_modified = metadata.modified().expect("readable filesystem mtime");
+    let fs_ns = chrono::DateTime::<chrono::Utc>::from(fs_modified)
+        .timestamp_nanos_opt()
+        .expect("filesystem mtime within the i64-nanos range");
+    assert_eq!(modified.into_timestamp_nanos(), fs_ns);
 }
