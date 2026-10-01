@@ -62,20 +62,51 @@ pub struct FileStructure {
 /// (implemented in the `epub` module). Re-exported for the MCP tools.
 pub use epub::read_image_entry;
 
-const CACHE_MAX_SIZE: u64 = 1024;
+/// Total weight budget of the text cache: the combined byte length of all
+/// cached normalized texts (plus 1 per entry).
+const CACHE_MAX_WEIGHT: u64 = 256 * 1024 * 1024; // 256 MiB
 
 /// LRU cache of normalized file text. The canonical handle lives in `AppState`;
 /// `IndexWriterWrapper` holds a clone sharing the same underlying store.
+///
+/// Bounded by the *total weight* of cached texts (see
+/// [`text_data_cache_with_max_weight`]), not by the number of entries: a
+/// directory full of large PDFs must not be able to grow the cache
+/// unboundedly.
 pub type TextDataCache = Cache<PathBuf, FileTextData>;
 
-/// Create a new text data cache with the standard capacity.
+/// Create a new text data cache bounded by `max_weight` — the maximum total
+/// byte length of all cached texts.
+///
+/// With a weigher set, moka interprets `max_capacity` as the total weight
+/// limit and evicts by weight in LRU order. The LRU policy (instead of the
+/// default TinyLFU) is required so that a newly requested file is always
+/// cached: TinyLFU's admission gate would reject a cold candidate while the
+/// cache is full until it becomes "popular", forcing redundant re-reads and
+/// re-conversions — files are usually read once. A single item heavier than
+/// the whole budget is never cached.
+pub fn text_data_cache_with_max_weight(max_weight: u64) -> TextDataCache {
+    Cache::builder()
+        .max_capacity(max_weight)
+        // Minimum weight 1 per entry: empty texts still count, so the entry
+        // count stays bounded even for files with zero-length text.
+        .weigher(|_path, data: &FileTextData| {
+            let bytes = u32::try_from(data.text.len()).unwrap_or(u32::MAX);
+            bytes.saturating_add(1)
+        })
+        .eviction_policy(moka::policy::EvictionPolicy::lru())
+        .build()
+}
+
+/// Create a new text data cache with the standard weight limit.
 pub fn new_text_data_cache() -> TextDataCache {
-    Cache::new(CACHE_MAX_SIZE)
+    text_data_cache_with_max_weight(CACHE_MAX_WEIGHT)
 }
 
 /// Load file text data with LRU caching.
 ///
-/// Caches up to `CACHE_MAX_SIZE` entries keyed by absolute path.
+/// Caches texts keyed by absolute path, bounded by the total weight of all
+/// cached texts (see [`text_data_cache_with_max_weight`]).
 pub async fn load_file_text_data(
     cache: &TextDataCache,
     file_path: &Path,

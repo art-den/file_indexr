@@ -29,6 +29,52 @@ async fn test_invalidate_text_data_cache() {
 }
 
 #[tokio::test]
+async fn test_cache_rejects_entry_heavier_than_budget() {
+    // Budget is 16 bytes; the 32-byte text weighs 33 and can never fit.
+    let file = make_temp_dir().join("too_big.txt");
+    std::fs::write(&file, "01234567890123456789012345678901").unwrap();
+    let cache = text_data_cache_with_max_weight(16);
+
+    // Loading itself still succeeds; the text is just not retained.
+    let data = load_file_text_data(&cache, &file).await.unwrap();
+    assert_eq!(data.text.len(), 32);
+
+    cache.run_pending_tasks();
+    assert_eq!(cache.entry_count(), 0);
+    assert!(cache.get(&file).is_none());
+}
+
+#[tokio::test]
+async fn test_cache_evicts_by_weight_lru() {
+    let dir = make_temp_dir();
+    let mut files = Vec::new();
+    for i in 0..4 {
+        let file = dir.join(format!("f{i}.txt"));
+        // 31 bytes of content -> weight 32 (len + 1 per entry).
+        std::fs::write(&file, format!("abcdefghijklmnopqrstuvwxyz0123{i}")).unwrap();
+        files.push(file);
+    }
+    let cache = text_data_cache_with_max_weight(100);
+
+    for file in &files[..3] {
+        load_file_text_data(&cache, file).await.unwrap();
+        cache.run_pending_tasks();
+    }
+    assert_eq!(cache.entry_count(), 3);
+    assert_eq!(cache.weighted_size(), 96);
+
+    // The 4th entry (32) overflows the budget (96 + 32 > 100): the LRU entry
+    // (f0) is evicted to make room, the rest stays.
+    load_file_text_data(&cache, &files[3]).await.unwrap();
+    cache.run_pending_tasks();
+    assert!(cache.get(&files[0]).is_none());
+    assert!(cache.get(&files[1]).is_some());
+    assert!(cache.get(&files[2]).is_some());
+    assert!(cache.get(&files[3]).is_some());
+    assert!(cache.weighted_size() <= 100);
+}
+
+#[tokio::test]
 async fn test_rst_load_and_structure() {
     let file = make_temp_dir().join("doc.rst");
     std::fs::write(
