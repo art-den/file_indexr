@@ -347,7 +347,7 @@ fn emit_delete_for_rename(path: &Path, changes: &mut Vec<FileChange>) {
 ///
 /// `watched_dir`/`index_path` are passed down so that expensive directory
 /// walks are skipped for excluded paths *before* they happen. Rename pairs
-/// are consumed as (from, to) via `chunks_exact(2)`, so the skip check must
+/// are consumed as (from, to) via `as_chunks::<2>()`, so the skip check must
 /// never remove paths from `event.paths` itself — that would break the
 /// pairing and could delete a live `to` path.
 async fn event_to_changes(event: &Event, watched_dir: &Path, index_path: &Path) -> Vec<FileChange> {
@@ -366,13 +366,13 @@ async fn event_to_changes(event: &Event, watched_dir: &Path, index_path: &Path) 
         match mode {
             notify::event::RenameMode::Both => {
                 // Paths come as (from, to) pairs per notify docs.
-                let mut pairs = event.paths.chunks_exact(2);
-                for pair in pairs.by_ref() {
+                let (pairs, remainder) = event.paths.as_chunks::<2>();
+                for pair in pairs {
                     emit_delete_for_rename(&pair[0], &mut changes);
                     add_as_modified(&pair[1], watched_dir, index_path, &mut changes).await;
                 }
                 // Handle odd trailing path (unlikely, but safe)
-                if let Some(odd) = pairs.remainder().first() {
+                if let Some(odd) = remainder.first() {
                     path_to_change(&event.kind, odd, watched_dir, index_path, &mut changes).await;
                 }
             }

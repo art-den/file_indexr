@@ -85,7 +85,7 @@ fn test_requeue_failed_drops_at_max_retry_count() {
 }
 
 #[tokio::test]
-async fn test_commit_task_panic_requeues_batch() {
+async fn test_commit_task_panic_drops_batch() {
     let watch_dir = make_test_temp_dir("watch");
     let index_dir = make_test_temp_dir("index");
     let config = Arc::new(make_test_config(&watch_dir, &index_dir));
@@ -100,42 +100,15 @@ async fn test_commit_task_panic_requeues_batch() {
     buffer_three_files(&writer, &watch_dir).await;
     assert_eq!(writer.buffer_len().await, 6);
 
-    // Inject a panic into the blocking task: the batch must survive the
-    // JoinError and come back to the buffer, not be lost.
+    // Inject a panic into the blocking task: the task owns the batch, so the
+    // panic drops it instead of requeueing. The affected files keep a stale
+    // stored mtime and are re-indexed on the next startup (deletion detection
+    // covers the dropped deletes).
     writer.panic_on_commit.store(true, Ordering::SeqCst);
     assert!(!writer.commit().await);
-    assert_eq!(writer.buffer_len().await, 6);
-
-    // The follow-up clean commit applies the requeued batch.
-    assert!(writer.commit().await);
     assert_eq!(writer.buffer_len().await, 0);
-    // A fresh reader reflects the latest committed state (commit awaited above).
+
+    // Nothing was committed.
     let reader = writer.index().reader().unwrap();
-    assert_eq!(reader.searcher().num_docs(), 3);
-}
-
-#[tokio::test]
-async fn test_commit_task_panic_drops_batch_after_max_retries() {
-    let watch_dir = make_test_temp_dir("watch");
-    let index_dir = make_test_temp_dir("index");
-    let config = Arc::new(make_test_config(&watch_dir, &index_dir));
-
-    let writer = IndexWriterWrapper::new(
-        &index_dir,
-        config.clone(),
-        crate::formats::new_text_data_cache(),
-    )
-    .await
-    .unwrap();
-    buffer_three_files(&writer, &watch_dir).await;
-
-    // Two failed commits: try_count goes 0 -> 1 -> 2 == MAX_RETRY_COUNT,
-    // so the batch is dropped per the retry contract.
-    writer.panic_on_commit.store(true, Ordering::SeqCst);
-    assert!(!writer.commit().await);
-    assert_eq!(writer.buffer_len().await, 6);
-
-    writer.panic_on_commit.store(true, Ordering::SeqCst);
-    assert!(!writer.commit().await);
-    assert_eq!(writer.buffer_len().await, 0);
+    assert_eq!(reader.searcher().num_docs(), 0);
 }

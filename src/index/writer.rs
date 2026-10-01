@@ -203,9 +203,10 @@ fn requeue_failed(mut failed: Vec<ChangeItem>) -> Vec<ChangeItem> {
         change.try_count += 1;
         if change.try_count >= MAX_RETRY_COUNT {
             // The change is lost for this session. Callers must treat a
-            // `false` return from `commit()` as "not applied". The file
-            // keeps its stale stored mtime, so the next startup
-            // re-indexes it.
+            // `false` return from `commit()` as "not applied". Only
+            // `Delete`/`DeleteDir` items reach this point; a dropped one
+            // leaves a stale index entry that the next startup's deletion
+            // detection removes.
             tracing::error!(
                 change = ?change,
                 "Change dropped after {} failed commit attempts", MAX_RETRY_COUNT
@@ -216,6 +217,60 @@ fn requeue_failed(mut failed: Vec<ChangeItem>) -> Vec<ChangeItem> {
         }
     });
     failed
+}
+
+/// Apply a `Delete`/`DeleteDir` item to the writer without moving its data,
+/// so a failing item can be requeued for retry. Returns true when the delete
+/// was applied to the writer (it still needs `commit` to persist).
+fn apply_delete_item(
+    writer: &IndexWriter,
+    path_exact_field: Option<Field>,
+    item: &ChangeItem,
+) -> bool {
+    match &item.data {
+        Change::Delete(path_str) => {
+            let Some(field) = path_exact_field else {
+                return false;
+            };
+            let term = Term::from_field_text(field, path_str);
+            writer.delete_query(Box::new(tantivy::query::TermQuery::new(
+                term,
+                tantivy::schema::IndexRecordOption::Basic,
+            )))
+            .map_err(|e| tracing::error!("writer.delete_query failed: {}", e))
+            .is_ok()
+        }
+        Change::DeleteDir(prefix) => {
+            let Some(field) = path_exact_field else {
+                return false;
+            };
+
+            // tantivy's FST-based regex doesn't support ^/$ anchors.
+            // Pattern `prefix.*` matches the full token since STRING fields
+            // are stored as single tokens, making explicit anchoring unnecessary.
+            let mut regex_pattern = regex::escape(prefix);
+            regex_pattern.push_str(".*");
+            let query = match tantivy::query::RegexQuery::from_pattern(&regex_pattern, field) {
+                Ok(q) => q,
+                Err(e) => {
+                    tracing::error!("Failed to compile regex for dir deletion: {}", e);
+                    return false;
+                }
+            };
+
+            match writer.delete_query(Box::new(query)) {
+                Ok(_) => {
+                    tracing::info!(pattern = %regex_pattern, "Deleted docs matching directory prefix");
+                    true
+                }
+                Err(e) => {
+                    tracing::error!("delete_query for dir deletion failed: {}", e);
+                    false
+                }
+            }
+        }
+        Change::Add(_) => unreachable!("Add items are applied in the commit loop"),
+    }
 }
 
 /// Index writer wrapper with batching support.
@@ -229,7 +284,7 @@ pub struct IndexWriterWrapper {
     base_canonical: PathBuf,
     text_data_cache: crate::formats::TextDataCache,
     /// Test seam: makes the next commit's blocking task panic, to exercise
-    /// the JoinError batch-recovery path.
+    /// the JoinError batch-drop path.
     #[cfg(test)]
     panic_on_commit: Arc<AtomicBool>,
 }
@@ -396,14 +451,20 @@ impl IndexWriterWrapper {
     /// Flush pending changes to disk.
     ///
     /// Returns `true` when the buffer was empty or all buffered changes
-    /// were committed. Returns `false` when the commit failed: failed
-    /// changes are returned to the buffer for retry (or dropped after
-    /// `MAX_RETRY_COUNT` attempts). Callers that decide what to persist
-    /// must treat `false` as "not applied".
-    /// Task-level failures (a panic or cancellation of the blocking task)
-    /// requeue the whole batch and also return `false` — reapplying is
-    /// idempotent, since `Delete`/`DeleteDir` are no-ops when nothing matches
-    /// and every `Add` is preceded by a `Delete` of the same path.
+    /// were committed. Returns `false` when the commit failed. Callers that
+    /// decide what to persist must treat `false` as "not applied".
+    ///
+    /// The blocking task takes ownership of the batch, so documents are moved
+    /// into the tantivy writer without cloning. Recovery of a failed commit is
+    /// therefore asymmetric:
+    /// - `Delete`/`DeleteDir` items keep their data owned by the task and are
+    ///   requeued for retry (dropped after `MAX_RETRY_COUNT` attempts).
+    /// - `Add` documents are consumed by `add_document` (or discarded by the
+    ///   rollback), so a failed commit drops them. The affected file keeps a
+    ///   stale stored mtime and is re-indexed on the next startup.
+    /// - A task-level failure (a panic or cancellation of the blocking task)
+    ///   drops the whole batch; the same stale-mtime rule covers the `Add`s
+    ///   and the startup deletion detection covers the `Delete`s.
     ///
     /// Blocking operations (`commit` / `rollback`) are offloaded to
     /// `spawn_blocking` so the async runtime is not starved during fsync.
@@ -413,10 +474,7 @@ impl IndexWriterWrapper {
             if buffer.is_empty() {
                 return true;
             }
-            // Keep the batch behind an Arc: the blocking task gets a clone,
-            // so if it fails we still own the changes and can requeue them
-            // instead of losing the whole batch.
-            Arc::new(buffer.drain(..).collect::<Vec<_>>())
+            buffer.drain(..).collect::<Vec<_>>()
         };
 
         let inner = Arc::clone(&self.inner);
@@ -430,11 +488,10 @@ impl IndexWriterWrapper {
                 None
             }
         };
-        let task_changes = Arc::clone(&changes);
         #[cfg(test)]
         let panic_on_commit = Arc::clone(&self.panic_on_commit);
 
-        let applied = tokio::task::spawn_blocking(move || {
+        let requeueable = tokio::task::spawn_blocking(move || {
             // Test seam: one-shot injected panic (swap returns the previous
             // value and resets the flag), converted by tokio into a JoinError
             // on the awaiting side.
@@ -448,93 +505,59 @@ impl IndexWriterWrapper {
             // tantivy's worker threads and op queue are unaffected by such a panic.
             let mut writer = inner.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut change_idx_applied = Vec::with_capacity(task_changes.len());
 
-            for (i, change) in task_changes.iter().enumerate() {
-                match &change.data {
-                    Change::Add(doc) => match writer.add_document(doc.clone()) {
-                        Ok(_) => change_idx_applied.push(i),
-                        Err(e) => tracing::error!("writer.add_document failed: {}", e),
-                    },
-                    Change::Delete(path_str) => {
-                        let Some(field) = path_exact_field else { continue; };
-                        let term = Term::from_field_text(field, path_str);
-                        match writer.delete_query(Box::new(tantivy::query::TermQuery::new(
-                            term,
-                            tantivy::schema::IndexRecordOption::Basic,
-                        ))) {
-                            Ok(_) => change_idx_applied.push(i),
-                            Err(e) => tracing::error!("writer.delete_query failed: {}", e),
+            // Delete items that were applied (requeued only if the commit rolls
+            // them back) and items that failed per-item (always requeued).
+            // Add documents are moved into the writer, so they are not
+            // recoverable on failure.
+            let mut applied_items: Vec<ChangeItem> = Vec::new();
+            let mut failed_items: Vec<ChangeItem> = Vec::new();
+
+            for item in changes {
+                match item.data {
+                    Change::Add(doc) => {
+                        if let Err(e) = writer.add_document(doc) {
+                            tracing::error!(
+                                error = %e,
+                                "writer.add_document failed; the document is dropped and the file will be re-indexed on the next startup"
+                            );
                         }
                     }
-                    Change::DeleteDir(prefix) => {
-                        let Some(field) = path_exact_field else { continue; };
-
-                        // tantivy's FST-based regex doesn't support ^/$ anchors.
-                        // Pattern `prefix.*` matches the full token since STRING fields
-                        // are stored as single tokens, making explicit anchoring unnecessary.
-                        let mut regex_pattern = regex::escape(prefix);
-                        regex_pattern.push_str(".*");
-                        let query = match tantivy::query::RegexQuery::from_pattern(&regex_pattern, field) {
-                            Ok(q) => q,
-                            Err(e) => {
-                                tracing::error!("Failed to compile regex for dir deletion: {}", e);
-                                continue;
-                            }
-                        };
-
-                        match writer.delete_query(Box::new(query)) {
-                            Ok(_) => {
-                                tracing::info!(pattern = %regex_pattern, "Deleted docs matching directory prefix");
-                                change_idx_applied.push(i);
-                            }
-                            Err(e) => {
-                                tracing::error!("delete_query for dir deletion failed: {}", e);
-                            }
+                    _ => {
+                        if apply_delete_item(&writer, path_exact_field, &item) {
+                            applied_items.push(item);
+                        } else {
+                            failed_items.push(item);
                         }
                     }
                 }
             }
 
-            let commit_result = writer.commit();
-            if let Err(e) = commit_result {
-                if let Err(rollback_err) = writer.rollback() {
-                    tracing::error!("writer.rollback failed: {}", rollback_err);
+            match writer.commit() {
+                Ok(_) => failed_items,
+                Err(e) => {
+                    if let Err(rollback_err) = writer.rollback() {
+                        tracing::error!("writer.rollback failed: {}", rollback_err);
+                    }
+                    // The rollback discards the applied deletes too, so every
+                    // delete item must be retried.
+                    tracing::error!("writer.commit failed: {}", e);
+                    applied_items.append(&mut failed_items);
+                    applied_items
                 }
-                change_idx_applied.clear();
-                tracing::error!("writer.commit failed: {}", e);
             }
-
-            change_idx_applied
         })
         .await;
 
-        // The task has finished on both `Ok` and `JoinError`, so its Arc clone
-        // is dropped and the batch can be recovered here.
-        let changes = Arc::try_unwrap(changes)
-            .expect("blocking task has finished, its Arc clone must be dropped");
-
-        // Changes to requeue: on `JoinError` (task panic or cancellation)
-        // the whole batch, otherwise the items the writer rejected.
-        // Reapplication is idempotent (see docs above).
-        let failed = match applied {
-            Ok(applied) => {
-                // `applied` is strictly ascending (pushed in one forward pass
-                // over the batch), so a merge scan avoids the HashSet allocation.
-                let mut failed = Vec::new();
-                let mut next_applied = 0usize;
-                for (i, item) in changes.into_iter().enumerate() {
-                    if applied.get(next_applied) == Some(&i) {
-                        next_applied += 1;
-                    } else {
-                        failed.push(item);
-                    }
-                }
-                failed
-            }
+        let failed = match requeueable {
+            Ok(items) => items,
+            // The task owned the batch, so a panic or cancellation drops it
+            // entirely. The dropped `Add`s keep a stale stored mtime (re-indexed
+            // on the next startup); the dropped `Delete`s are cleaned up by the
+            // next startup's deletion detection.
             Err(join_error) => {
-                tracing::error!(error = %join_error, "Commit task failed; requeueing batch for retry");
-                changes
+                tracing::error!(error = %join_error, "Commit task failed; batch dropped — the changes are re-applied on the next startup");
+                return false;
             }
         };
 

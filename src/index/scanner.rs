@@ -81,11 +81,9 @@ fn indexed_mtime_in_segment(
             Some(bitset) => bitset.is_alive(doc),
             None => true,
         };
-        if is_alive {
-            if let Some(dt) = column.first(doc) {
-                let ns = dt.into_timestamp_nanos();
-                max_ns = Some(i64::max(max_ns.unwrap_or(ns), ns));
-            }
+        if is_alive && let Some(dt) = column.first(doc) {
+            let ns = dt.into_timestamp_nanos();
+            max_ns = Some(i64::max(max_ns.unwrap_or(ns), ns));
         }
         postings.advance();
     }

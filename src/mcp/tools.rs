@@ -189,10 +189,10 @@ impl Tools {
         // stored inside an EPUB; the inner path may be document-relative.
         // Commits only when the outer part is a regular file, so a
         // directory named `x.epub` still falls through to the on-disk flow.
-        if let Some((epub_rel, inner)) = split_virtual_epub_path(path) {
-            if is_regular_file(epub_rel, state).await {
-                return Self::serve_epub_image(epub_rel, inner, state).await;
-            }
+        if let Some((epub_rel, inner)) = split_virtual_epub_path(path)
+            && is_regular_file(epub_rel, state).await
+        {
+            return Self::serve_epub_image(epub_rel, inner, state).await;
         }
 
         let resolved = validate_doc_path(path, state).await.map_err(mcp_error)?;

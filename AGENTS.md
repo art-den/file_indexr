@@ -11,6 +11,7 @@ Single-user — no auth, RBAC, or shared indexes.
 - Tantivy: `IndexWriter` holds an exclusive lock — drop it before creating a new one on the same path; explicit `.commit()` is required for search visibility.
 - Search snippets use `StreamExt::buffered`, which preserves result order — do not replace with `buffer_unordered`.
 - The startup scan runs in a background task concurrent with the file watcher, and both share the same `IndexWriterWrapper`. This is safe only because the writer is internally locked and the change model is idempotent (every `Add` is preceded by a `Delete` of the same path; `Delete`/`DeleteDir` are no-ops when nothing matches) — keep it that way.
+- A failed or cancelled commit drops buffered `Add`s: the blocking commit task owns the batch and documents are moved into the tantivy writer, so they cannot be requeued. `Delete`/`DeleteDir` are requeued in-session up to `MAX_RETRY_COUNT`. Recovery is always the next startup scan — stale stored mtime re-indexes missed `Add`s, deletion detection removes entries from dropped `Delete`s. Don't assume a `false` return from `commit()` preserves the buffer.
 - Virtual EPUB image paths in `docs_get` (`<book.epub>/<inner>`): only the outer EPUB file goes through `validate_path`. The inner part is an opaque zip-entry lookup (literal name, else unique suffix match) that cannot escape the archive — do not run it through filesystem operations.
 
 ## Testing

@@ -82,12 +82,13 @@ pub fn to_markdown(rst: &str) -> String {
         }
 
         // Section title: underlined form (text + underline).
-        if !is_indented(line) && i + 1 < lines.len() {
-            if let Some(ch) = punct(lines[i + 1]) {
-                emit_title(&mut out, line.trim(), ch, &mut section_levels);
-                i += 2;
-                continue;
-            }
+        if !is_indented(line)
+            && i + 1 < lines.len()
+            && let Some(ch) = punct(lines[i + 1])
+        {
+            emit_title(&mut out, line.trim(), ch, &mut section_levels);
+            i += 2;
+            continue;
         }
 
         // Directive or comment (line starting with "..").

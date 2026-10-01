@@ -73,9 +73,10 @@ impl IndexCoordinator {
         let (processed, changed) = run_scan(&self.writer, &self.config).await;
 
         // Final commit after scan. A failure must not return Err, so a transient
-        // disk failure at startup does not kill the service. Unapplied changes
-        // stay buffered for the event loop to retry; the file keeps its stale
-        // stored mtime, so the next start re-indexes it.
+        // disk failure at startup does not kill the service. Unapplied
+        // `Delete`/`DeleteDir` changes stay buffered for the event loop to
+        // retry; dropped `Add`s keep a stale stored mtime, so the next start
+        // re-indexes them.
         commit_or_log(&self.writer, "Startup commit failed").await;
 
         let changed = changed.unwrap_or(0);
@@ -188,8 +189,9 @@ async fn event_loop(
 async fn commit_or_log(writer: &IndexWriterWrapper, context: &str) -> bool {
     let applied = writer.commit().await;
     if !applied {
-        // Failed changes are requeued for retry (or dropped after
-        // MAX_RETRY_COUNT), so warn instead of error.
+        // Failed `Delete`/`DeleteDir` changes are requeued for retry (or
+        // dropped after MAX_RETRY_COUNT); dropped `Add`s are re-indexed on
+        // the next startup via stale-mtime detection. Warn, not error.
         warn!("{context} — changes not applied");
     }
     applied
