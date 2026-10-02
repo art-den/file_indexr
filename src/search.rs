@@ -100,6 +100,7 @@ pub struct SearchResultItem {
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
     pub total: usize,
+    /// Search duration in milliseconds.
     pub search_time_ms: f64,
     pub limit_applied: usize,
     pub results: Vec<SearchResultItem>,
@@ -174,7 +175,7 @@ pub async fn search(
         .collect()
         .await;
 
-    let elapsed_ms = start.elapsed().as_secs_f64() * 100.0;
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     Ok(SearchResponse {
         total: total_hits,
