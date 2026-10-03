@@ -11,6 +11,7 @@ use tracing::warn;
 
 use crate::AppState;
 use crate::config::{Config, PathValidateResult};
+use crate::error::AppError;
 use crate::formats::{FileFormat, FileTextData, TextDataCache, load_file_text_data};
 use crate::search::{self, SearchParams, SortBy, SortOrder};
 
@@ -47,6 +48,12 @@ impl IntoResponse for HttpError {
     }
 }
 
+impl From<AppError> for HttpError {
+    fn from(error: AppError) -> Self {
+        HttpError::new(error.status(), error.to_string())
+    }
+}
+
 async fn load_validated_file(
     config: &Config,
     path: &str,
@@ -54,25 +61,14 @@ async fn load_validated_file(
 ) -> Result<FileTextData, HttpError> {
     let canonical_path = match config.validate_path(path).await {
         PathValidateResult::Valid(p) => p,
-        PathValidateResult::OutsideDirectory => {
-            return Err(HttpError::new(
-                StatusCode::FORBIDDEN,
-                "Path outside watched directory",
-            ));
-        }
-        PathValidateResult::NotFound => {
-            return Err(HttpError::new(StatusCode::NOT_FOUND, "File not found"));
-        }
+        r => return Err(AppError::from_invalid_path(path, r).into()),
     };
 
-    load_file_text_data(cache, &canonical_path)
+    load_file_text_data(cache, &canonical_path, config.max_file_size_bytes())
         .await
         .map_err(|err| {
-            warn!("Failed to load file {:?}: {err}", canonical_path);
-            HttpError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to load file: {err}"),
-            )
+            warn!(path = %path, error = %err, "Failed to load file");
+            err.into()
         })
 }
 
@@ -145,6 +141,7 @@ pub(crate) async fn search_handler(
         &state.config.directory,
         &state.text_data_cache,
         true,
+        state.config.max_file_size_bytes(),
     )
     .await
     .map_err(|err| {

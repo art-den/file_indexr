@@ -548,8 +548,7 @@ async fn test_scan_reindexes_file_with_newer_mtime() {
 
     // Set the mtime strictly in the future (filetime converts via SystemTime).
     let path = watch_dir.join("a.txt");
-    let future: std::time::SystemTime =
-        (chrono::Utc::now() + chrono::Duration::minutes(1)).into();
+    let future: std::time::SystemTime = (chrono::Utc::now() + chrono::Duration::minutes(1)).into();
     filetime::set_file_mtime(&path, future.into()).unwrap();
 
     // Second scan — the file must be re-indexed (exactly 1 change).

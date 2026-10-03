@@ -1091,8 +1091,11 @@ async fn test_rename_hidden_dir_to_visible_indexes_files() -> Result<()> {
     let watch_dir = make_temp_dir();
     let index_dir = make_temp_dir();
     // .cpp is not a recognized format: index it via an explicit allow-list.
-    let config =
-        Arc::new(make_config_with_extensions(watch_dir.clone(), index_dir.clone(), &["cpp"]));
+    let config = Arc::new(make_config_with_extensions(
+        watch_dir.clone(),
+        index_dir.clone(),
+        &["cpp"],
+    ));
 
     // Initial empty index
     {
@@ -1201,8 +1204,11 @@ async fn test_rename_visible_dir_to_hidden_removes_files() -> Result<()> {
     let watch_dir = make_temp_dir();
     let index_dir = make_temp_dir();
     // .cpp is not a recognized format: index it via an explicit allow-list.
-    let config =
-        Arc::new(make_config_with_extensions(watch_dir.clone(), index_dir.clone(), &["cpp"]));
+    let config = Arc::new(make_config_with_extensions(
+        watch_dir.clone(),
+        index_dir.clone(),
+        &["cpp"],
+    ));
 
     // Initial index — populate with files in cpp/
     {

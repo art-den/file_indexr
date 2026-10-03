@@ -4,9 +4,10 @@ use std::fmt::Write;
 use itertools::Itertools;
 use serde_json::{Value, json};
 
-use super::jsonrpc::{Error, INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND};
+use super::jsonrpc::{Error, INVALID_PARAMS, METHOD_NOT_FOUND};
 use crate::AppState;
 use crate::config::PathValidateResult;
+use crate::error::AppError;
 use crate::search::{self, SearchParams};
 
 #[cfg(test)]
@@ -119,7 +120,7 @@ impl Tools {
     async fn handle_search(args: &Value, state: &AppState) -> Result<Value, Error> {
         let query = extract_str(args, "query")?.trim();
         if query.is_empty() {
-            return Ok(text_result("Search query is empty"));
+            return Ok(tool_error("Search query is empty"));
         }
         // `search::search` clamps the limit to [1, MAX_RESULTS_LIMIT] itself.
         let max_results = extract_u64(args, "max_results")
@@ -134,15 +135,20 @@ impl Tools {
         };
 
         // MCP output must stay plain text — no HTML markup in snippets.
-        let response = crate::search::search(
+        let response = match crate::search::search(
             &state.reader,
             search_params,
             &state.config.directory,
             &state.text_data_cache,
             false,
+            state.config.max_file_size_bytes(),
         )
         .await
-        .map_err(|e| mcp_error(format!("Search failed: {}", e)))?;
+        {
+            Ok(r) => r,
+            // A failed search is a tool execution failure, not a protocol error.
+            Err(e) => return Ok(tool_error(format!("Search failed: {e}"))),
+        };
 
         let mut text = format!("Found {} result(s):\n\n", response.total);
         for (i, r) in response.results.iter().enumerate() {
@@ -161,11 +167,21 @@ impl Tools {
 
     async fn handle_headings(args: &Value, state: &AppState) -> Result<Value, Error> {
         let path = extract_str(args, "path")?;
-        let resolved = validate_doc_path(path, state).await.map_err(mcp_error)?;
+        let resolved = match validated_path(path, state).await {
+            Ok(p) => p,
+            Err(e) => return Ok(tool_error(&e)),
+        };
 
-        let data = crate::formats::load_file_text_data(&state.text_data_cache, &resolved)
-            .await
-            .map_err(|e| mcp_error(format!("Failed to read file: {}", e)))?;
+        let data = match crate::formats::load_file_text_data(
+            &state.text_data_cache,
+            &resolved,
+            state.config.max_file_size_bytes(),
+        )
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => return Ok(tool_error(&e)),
+        };
         let structure = data.structure();
         let mut out = format!("{} ({} lines)\n\n", path, structure.total_lines);
         for h in &structure.headers {
@@ -195,7 +211,10 @@ impl Tools {
             return Self::serve_epub_image(epub_rel, inner, state).await;
         }
 
-        let resolved = validate_doc_path(path, state).await.map_err(mcp_error)?;
+        let resolved = match validated_path(path, state).await {
+            Ok(p) => p,
+            Err(e) => return Ok(tool_error(&e)),
+        };
 
         // Images skip text normalization and are returned as MCP image content.
         if image_mime_type(&resolved).is_some() {
@@ -206,12 +225,19 @@ impl Tools {
         let end_line = extract_u64(args, "end_line");
 
         // Load and normalize content via formats module.
-        let data = crate::formats::load_file_text_data(&state.text_data_cache, &resolved)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to read file: {}", e);
-                mcp_error(e.to_string())
-            })?;
+        let data = match crate::formats::load_file_text_data(
+            &state.text_data_cache,
+            &resolved,
+            state.config.max_file_size_bytes(),
+        )
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to read file");
+                return Ok(tool_error(&e));
+            }
+        };
 
         let body = if start_line.is_some() || end_line.is_some() {
             // Explicit line range (1-based, inclusive) — slice the line iterator.
@@ -243,23 +269,26 @@ impl Tools {
 
     /// Read an image file from disk and return it as MCP image content (base64).
     async fn serve_image(resolved: &std::path::Path, state: &AppState) -> Result<Value, Error> {
-        // Size check before reading so oversized files are not loaded at all.
-        let metadata = tokio::fs::metadata(resolved)
-            .await
-            .map_err(|e| mcp_error(format!("Failed to read file: {e}")))?;
         let max_bytes = state.config.max_file_size_bytes();
+        // Size check before reading so oversized files are not loaded at all.
+        let metadata = match tokio::fs::metadata(resolved).await {
+            Ok(m) => m,
+            Err(e) => return Ok(tool_error(AppError::from_io(e, resolved))),
+        };
+        if !metadata.is_file() {
+            return Ok(tool_error(AppError::NotAFile {
+                path: resolved.to_path_buf(),
+            }));
+        }
         if metadata.len() > max_bytes {
-            return Err(mcp_error(format!(
-                "File is too large ({} bytes, limit {} bytes)",
-                metadata.len(),
-                max_bytes
-            )));
+            return Ok(tool_error(AppError::too_large(metadata.len(), max_bytes)));
         }
 
-        let bytes = tokio::fs::read(resolved)
-            .await
-            .map_err(|e| mcp_error(format!("Failed to read file: {e}")))?;
-        image_content(&bytes, resolved, state)
+        let bytes = match tokio::fs::read(resolved).await {
+            Ok(b) => b,
+            Err(e) => return Ok(tool_error(AppError::from_io(e, resolved))),
+        };
+        Ok(image_content(&bytes, resolved, state))
     }
 
     /// Serve an image stored inside an EPUB archive (virtual path
@@ -269,18 +298,25 @@ impl Tools {
         inner: &str,
         state: &AppState,
     ) -> Result<Value, Error> {
-        let resolved = validate_doc_path(epub_rel, state).await.map_err(mcp_error)?;
+        let resolved = match validated_path(epub_rel, state).await {
+            Ok(p) => p,
+            Err(e) => return Ok(tool_error(&e)),
+        };
 
         let inner = inner.to_string();
         let max_bytes = state.config.max_file_size_bytes();
-        let (name, bytes) = tokio::task::spawn_blocking(move || {
+        let (name, bytes) = match tokio::task::spawn_blocking(move || {
             crate::formats::read_image_entry(&resolved, &inner, max_bytes)
         })
         .await
-        .map_err(|e| mcp_error(format!("Failed to read EPUB: {e}")))?
-        .map_err(|e| mcp_error(e.to_string()))?;
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Ok(tool_error(&e)),
+            // A cancelled/panicked blocking task loses the "EPUB" context.
+            Err(e) => return Ok(tool_error(format!("Failed to read EPUB: {e}"))),
+        };
 
-        image_content(&bytes, std::path::Path::new(&name), state)
+        Ok(image_content(&bytes, std::path::Path::new(&name), state))
     }
 }
 
@@ -294,17 +330,13 @@ async fn is_regular_file(rel_path: &str, state: &AppState) -> bool {
     tokio::fs::metadata(&full).await.is_ok_and(|m| m.is_file())
 }
 
-/// Validate a docs tool path argument.
-async fn validate_doc_path(path: &str, state: &AppState) -> Result<std::path::PathBuf, String> {
-    if path.is_empty() {
-        return Err("Path is required".into());
-    }
+/// Validate a docs tool path argument. Callers convert the returned error
+/// into an MCP `isError` result via [`tool_error`] (tool execution errors are
+/// results per the MCP spec, not JSON-RPC protocol errors).
+async fn validated_path(path: &str, state: &AppState) -> Result<std::path::PathBuf, AppError> {
     match state.config.validate_path(path).await {
         PathValidateResult::Valid(p) => Ok(p),
-        PathValidateResult::OutsideDirectory => {
-            Err("File path is outside the watched directory".into())
-        }
-        PathValidateResult::NotFound => Err(format!("File not found: {}", path)),
+        r => Err(AppError::from_invalid_path(path, r)),
     }
 }
 
@@ -321,8 +353,14 @@ fn extract_u64(args: &Value, key: &str) -> Option<u64> {
     args.get(key).and_then(|v| v.as_u64())
 }
 
-fn mcp_error(msg: String) -> Error {
-    Error::new(INTERNAL_ERROR, msg)
+/// Wrap a tool execution failure into an MCP `isError` result. Per the MCP
+/// spec, tool execution errors (missing file, unsupported format, ...) are
+/// results with `isError: true`, not JSON-RPC protocol errors.
+fn tool_error(error: impl std::fmt::Display) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": error.to_string() }],
+        "isError": true,
+    })
 }
 
 fn text_result(text: impl Into<String>) -> Value {
@@ -341,28 +379,18 @@ fn image_result(data: &str, mime_type: &str) -> Value {
 }
 
 /// Shared tail of the image-serving paths: MIME check by extension, size
-/// limit, base64 encoding, MCP image content.
-fn image_content(
-    bytes: &[u8],
-    file_path: &std::path::Path,
-    state: &AppState,
-) -> Result<Value, Error> {
-    let mime = image_mime_type(file_path).ok_or_else(|| {
-        mcp_error(format!(
-            "Unsupported image format: {}",
-            file_path.display()
-        ))
-    })?;
+/// limit, base64 encoding, MCP image content. Failures are returned as MCP
+/// `isError` results.
+fn image_content(bytes: &[u8], file_path: &std::path::Path, state: &AppState) -> Value {
+    let Some(mime) = image_mime_type(file_path) else {
+        return tool_error(AppError::unsupported_format(file_path));
+    };
     let max_bytes = state.config.max_file_size_bytes();
     if bytes.len() as u64 > max_bytes {
-        return Err(mcp_error(format!(
-            "File is too large ({} bytes, limit {} bytes)",
-            bytes.len(),
-            max_bytes
-        )));
+        return tool_error(AppError::too_large(bytes.len() as u64, max_bytes));
     }
     let data = base64::engine::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
-    Ok(image_result(&data, mime))
+    image_result(&data, mime)
 }
 
 /// Split a virtual archive path "<file.epub>/<inner>" into its parts.

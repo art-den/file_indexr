@@ -671,9 +671,17 @@ fn test_stdio_tools_call_docs_get_file_not_found() {
         serde_json::json!({"name": "docs_get", "arguments": {"path": "nonexistent.txt"}}),
     );
     assert!(resp.is_some());
+    // Per the MCP spec, tool execution errors are results with isError: true,
+    // not JSON-RPC protocol errors.
+    let value = resp.as_ref().unwrap();
+    assert!(value["error"].is_null());
+    assert_eq!(value["result"]["isError"], true);
     assert!(
-        resp.as_ref().unwrap()["error"].is_object(),
-        "should return error for missing file"
+        value["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("file not found"),
+        "should report the missing file as an isError result"
     );
 }
 

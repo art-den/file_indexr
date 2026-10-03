@@ -69,6 +69,7 @@ async fn test_search_by_content() {
         &watch_dir,
         &cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -88,9 +89,16 @@ async fn test_snippet_html_highlighting() {
     };
 
     // Plain snippets must not contain any markup.
-    let result = search(&reader, make_params("Hello"), &watch_dir, &cache, false)
-        .await
-        .unwrap();
+    let result = search(
+        &reader,
+        make_params("Hello"),
+        &watch_dir,
+        &cache,
+        false,
+        u64::MAX,
+    )
+    .await
+    .unwrap();
     let item = result
         .results
         .iter()
@@ -100,9 +108,16 @@ async fn test_snippet_html_highlighting() {
     assert!(!item.snippet.contains('<'));
 
     // HTML snippets wrap matches in <mark> and escape raw HTML.
-    let result = search(&reader, make_params("Hello"), &watch_dir, &cache, true)
-        .await
-        .unwrap();
+    let result = search(
+        &reader,
+        make_params("Hello"),
+        &watch_dir,
+        &cache,
+        true,
+        u64::MAX,
+    )
+    .await
+    .unwrap();
     let item = result
         .results
         .iter()
@@ -128,6 +143,7 @@ async fn test_snippet_empty_when_content_unmatched() {
         &watch_dir,
         &cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -185,6 +201,7 @@ async fn test_result_order_preserved_with_concurrent_snippets() {
             &watch_dir,
             &cache,
             false,
+            u64::MAX,
         )
         .await
         .unwrap();
@@ -193,6 +210,47 @@ async fn test_result_order_preserved_with_concurrent_snippets() {
         let actual: Vec<String> = result.results.iter().map(|r| r.filename.clone()).collect();
         assert_eq!(actual, expected);
     }
+}
+
+#[tokio::test]
+async fn test_snippet_empty_when_file_grows_past_limit() {
+    // A file can grow past the size limit after indexing. The search must
+    // still return the result, with an empty snippet.
+    let watch_dir = make_temp_dir();
+    let index_dir = make_temp_dir();
+    let config = make_config(&watch_dir, index_dir);
+
+    std::fs::write(watch_dir.join("grow.txt"), "needle text").unwrap();
+    let writer = make_writer(config).await;
+    writer.add_file(watch_dir.join("grow.txt")).await.unwrap();
+    writer.commit().await;
+
+    // Grow the file past the search-time limit (max_bytes = 4).
+    std::fs::write(watch_dir.join("grow.txt"), "needle text grew a lot").unwrap();
+
+    let reader = writer.index().reader().unwrap();
+    let cache = crate::formats::new_text_data_cache();
+
+    let result = search(
+        &reader,
+        SearchParams {
+            q: "needle".to_string(),
+            ..Default::default()
+        },
+        &watch_dir,
+        &cache,
+        false,
+        4,
+    )
+    .await
+    .unwrap();
+
+    let item = result
+        .results
+        .iter()
+        .find(|r| r.path.contains("grow.txt"))
+        .unwrap();
+    assert!(item.snippet.is_empty());
 }
 
 #[tokio::test]
@@ -209,6 +267,7 @@ async fn test_search_by_filename() {
         &watch_dir,
         &cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -231,6 +290,7 @@ async fn test_search_with_extension_filter() {
         &watch_dir,
         &cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -248,11 +308,7 @@ async fn test_search_extension_case_insensitive() {
     // PNG/JPG are not recognized formats: an empty allow-list would skip
     // them, so index them via an explicit extension list.
     let mut config = (*make_config(&watch_dir, index_dir)).clone();
-    config.allowed_extensions = vec![
-        "png".to_string(),
-        "jpg".to_string(),
-        "rs".to_string(),
-    ];
+    config.allowed_extensions = vec!["png".to_string(), "jpg".to_string(), "rs".to_string()];
     let config = Arc::new(config);
 
     // Create files with mixed-case extensions
@@ -280,6 +336,7 @@ async fn test_search_extension_case_insensitive() {
         &watch_dir,
         writer.text_data_cache(),
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -296,6 +353,7 @@ async fn test_search_extension_case_insensitive() {
         &watch_dir,
         writer.text_data_cache(),
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -317,6 +375,7 @@ async fn test_search_with_path_filter() {
         &watch_dir,
         &cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -339,6 +398,7 @@ async fn test_empty_query_returns_all() {
         &watch_dir,
         &cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -363,6 +423,7 @@ async fn test_search_content_false() {
         &watch_dir,
         &cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -385,6 +446,7 @@ async fn test_search_max_results() {
         &watch_dir,
         &cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -407,6 +469,7 @@ async fn test_search_no_results() {
         &watch_dir,
         &cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -437,6 +500,7 @@ async fn test_search_result_modified_is_populated() {
         &watch_dir,
         &cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -464,7 +528,7 @@ async fn test_search_query_with_special_chars_falls_back_to_term_query() {
         q: "`std::vector`".to_string(),
         ..SearchParams::default()
     };
-    let result = search(&reader, params, &watch_dir, &cache, false).await;
+    let result = search(&reader, params, &watch_dir, &cache, false, u64::MAX).await;
     assert!(
         result.is_ok(),
         "expected success, got error: {:?}",
@@ -476,7 +540,7 @@ async fn test_search_query_with_special_chars_falls_back_to_term_query() {
         q: "hello [unmatched".to_string(),
         ..SearchParams::default()
     };
-    let result = search(&reader, params, &watch_dir, &cache, false).await;
+    let result = search(&reader, params, &watch_dir, &cache, false, u64::MAX).await;
     assert!(
         result.is_ok(),
         "expected success, got error: {:?}",

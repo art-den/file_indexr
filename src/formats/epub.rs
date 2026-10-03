@@ -80,7 +80,11 @@ pub fn read_image_entry(
         anyhow::anyhow!("Not a valid EPUB (zip) archive: {}", archive_path.display())
     })?;
 
-    let target = inner_path.split('#').next().unwrap().trim_start_matches('/');
+    let target = inner_path
+        .split('#')
+        .next()
+        .unwrap()
+        .trim_start_matches('/');
     if target.is_empty() {
         return Err(anyhow::anyhow!("Empty image path in EPUB archive"));
     }
@@ -104,7 +108,7 @@ pub fn read_image_entry(
             0 => {
                 return Err(anyhow::anyhow!(
                     "Image '{inner_path}' not found in EPUB archive"
-                ))
+                ));
             }
             1 => matches[0].to_string(),
             n => {

@@ -36,7 +36,9 @@ pub(super) fn to_markdown(html: &str) -> anyhow::Result<String> {
         extract_metadata: false,
         ..ConversionOptions::default()
     };
-    Ok(html_to_markdown_rs::convert(html, options)?.content.unwrap_or_default())
+    Ok(html_to_markdown_rs::convert(html, options)?
+        .content
+        .unwrap_or_default())
 }
 
 /// Decode raw HTML bytes into UTF-8, borrowing from `bytes` when it is already

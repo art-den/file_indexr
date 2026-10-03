@@ -20,6 +20,7 @@ pub struct AppState {
 pub mod api;
 pub mod change;
 pub mod config;
+pub mod error;
 pub mod formats;
 pub mod index;
 pub mod mcp;

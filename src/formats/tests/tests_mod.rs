@@ -11,20 +11,20 @@ async fn test_invalidate_text_data_cache() {
     let cache = new_text_data_cache();
 
     // Warm the cache.
-    let first = load_file_text_data(&cache, &file).await.unwrap();
+    let first = load_file_text_data(&cache, &file, u64::MAX).await.unwrap();
     assert_eq!(first.text.as_str(), "version one");
 
     // Modify the file on disk; the cache entry is now stale.
     std::fs::write(&file, "version two").unwrap();
 
     // Without invalidation the cache still serves the stale copy.
-    let stale = load_file_text_data(&cache, &file).await.unwrap();
+    let stale = load_file_text_data(&cache, &file, u64::MAX).await.unwrap();
     assert_eq!(stale.text.as_str(), "version one");
 
     cache.invalidate(&file);
 
     // After invalidation fresh content is read from disk.
-    let fresh = load_file_text_data(&cache, &file).await.unwrap();
+    let fresh = load_file_text_data(&cache, &file, u64::MAX).await.unwrap();
     assert_eq!(fresh.text.as_str(), "version two");
 }
 
@@ -36,7 +36,7 @@ async fn test_cache_rejects_entry_heavier_than_budget() {
     let cache = text_data_cache_with_max_weight(16);
 
     // Loading itself still succeeds; the text is just not retained.
-    let data = load_file_text_data(&cache, &file).await.unwrap();
+    let data = load_file_text_data(&cache, &file, u64::MAX).await.unwrap();
     assert_eq!(data.text.len(), 32);
 
     cache.run_pending_tasks();
@@ -57,7 +57,7 @@ async fn test_cache_evicts_by_weight_lru() {
     let cache = text_data_cache_with_max_weight(100);
 
     for file in &files[..3] {
-        load_file_text_data(&cache, file).await.unwrap();
+        load_file_text_data(&cache, file, u64::MAX).await.unwrap();
         cache.run_pending_tasks();
     }
     assert_eq!(cache.entry_count(), 3);
@@ -65,13 +65,55 @@ async fn test_cache_evicts_by_weight_lru() {
 
     // The 4th entry (32) overflows the budget (96 + 32 > 100): the LRU entry
     // (f0) is evicted to make room, the rest stays.
-    load_file_text_data(&cache, &files[3]).await.unwrap();
+    load_file_text_data(&cache, &files[3], u64::MAX)
+        .await
+        .unwrap();
     cache.run_pending_tasks();
     assert!(cache.get(&files[0]).is_none());
     assert!(cache.get(&files[1]).is_some());
     assert!(cache.get(&files[2]).is_some());
     assert!(cache.get(&files[3]).is_some());
     assert!(cache.weighted_size() <= 100);
+}
+
+#[tokio::test]
+async fn test_load_rejects_missing_dir_oversized_and_unknown_format() {
+    let dir = make_temp_dir();
+    let cache = new_text_data_cache();
+
+    // Missing file -> NotFound.
+    let missing = dir.join("missing.txt");
+    let Err(err) = load_file_text_data(&cache, &missing, u64::MAX).await else {
+        panic!("expected an error for a missing file");
+    };
+    assert!(matches!(err, AppError::NotFound { .. }), "{err}");
+
+    // Directory -> NotAFile.
+    let subdir = dir.join("subdir");
+    std::fs::create_dir(&subdir).unwrap();
+    let Err(err) = load_file_text_data(&cache, &subdir, u64::MAX).await else {
+        panic!("expected an error for a directory");
+    };
+    assert!(matches!(err, AppError::NotAFile { .. }), "{err}");
+
+    // File over max_bytes -> TooLarge, rejected before reading.
+    let large = dir.join("large.txt");
+    std::fs::write(&large, [0u8; 16]).unwrap();
+    let Err(err) = load_file_text_data(&cache, &large, 8).await else {
+        panic!("expected an error for an oversized file");
+    };
+    assert!(
+        matches!(err, AppError::TooLarge { size: 16, limit: 8 }),
+        "{err}"
+    );
+
+    // Unrecognized extension -> UnsupportedFormat.
+    let unknown = dir.join("file.xyz");
+    std::fs::write(&unknown, "data").unwrap();
+    let Err(err) = load_file_text_data(&cache, &unknown, u64::MAX).await else {
+        panic!("expected an error for an unknown format");
+    };
+    assert!(matches!(err, AppError::UnsupportedFormat { .. }), "{err}");
 }
 
 #[tokio::test]
@@ -84,7 +126,7 @@ async fn test_rst_load_and_structure() {
     .unwrap();
     let cache = new_text_data_cache();
 
-    let data = load_file_text_data(&cache, &file).await.unwrap();
+    let data = load_file_text_data(&cache, &file, u64::MAX).await.unwrap();
     assert!(matches!(data.format, FileFormat::Rst));
     assert!(data.text.contains("# Title"));
     assert!(data.text.contains("## Sub Section"));

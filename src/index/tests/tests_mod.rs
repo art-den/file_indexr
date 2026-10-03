@@ -34,6 +34,7 @@ async fn found(
         watch_dir,
         cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap()

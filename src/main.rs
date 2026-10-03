@@ -139,7 +139,10 @@ async fn run_http_server(
     Ok(())
 }
 
-async fn run_stdio_mode(state: AppState, scan_task: tokio::task::JoinHandle<Result<u64>>) -> Result<()> {
+async fn run_stdio_mode(
+    state: AppState,
+    scan_task: tokio::task::JoinHandle<Result<u64>>,
+) -> Result<()> {
     use file_indexr::mcp::stdio::run_stdio_loop;
 
     let (watcher_shutdown_tx, mut watcher_done_rx, watcher_task) =

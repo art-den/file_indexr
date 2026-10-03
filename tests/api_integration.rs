@@ -145,7 +145,12 @@ async fn test_file_endpoint_rejects_path_outside_directory() {
 
     assert_eq!(status, StatusCode::FORBIDDEN);
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["error"], "Path outside watched directory");
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("outside the watched directory")
+    );
 }
 
 #[tokio::test]
@@ -157,7 +162,76 @@ async fn test_file_endpoint_missing_file_returns_404() {
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["error"], "File not found");
+    assert!(value["error"].as_str().unwrap().contains("file not found"));
+}
+
+#[tokio::test]
+async fn test_file_endpoint_unsupported_format_returns_415() {
+    let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
+    std::fs::write(watch_dir.join("data.bin"), b"binary").unwrap();
+    let router = create_router(state);
+
+    let (status, _headers, body) = call_get(router, "/file?path=data.bin").await;
+
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("Unsupported format: bin")
+    );
+}
+
+#[tokio::test]
+async fn test_file_endpoint_directory_returns_400() {
+    let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
+    std::fs::create_dir(watch_dir.join("subdir")).unwrap();
+    let router = create_router(state);
+
+    let (status, _headers, body) = call_get(router, "/file?path=subdir").await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a regular file")
+    );
+}
+
+#[tokio::test]
+async fn test_file_endpoint_empty_path_returns_404() {
+    let state = make_test_state().await;
+    let router = create_router(state);
+
+    let (status, _headers, body) = call_get(router, "/file?path=").await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(value["error"].as_str().unwrap().contains("file not found"));
+}
+
+#[tokio::test]
+async fn test_file_endpoint_oversized_file_returns_413() {
+    let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
+    // Exceed the configured max_file_size_mb (2 -> 2_000_000 bytes).
+    std::fs::write(
+        watch_dir.join("big.txt"),
+        vec![b'x'; state.config.max_file_size_bytes() as usize + 1],
+    )
+    .unwrap();
+    let router = create_router(state);
+
+    let (status, _headers, body) = call_get(router, "/file?path=big.txt").await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(value["error"].as_str().unwrap().contains("too large"));
 }
 
 #[tokio::test]

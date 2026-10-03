@@ -476,7 +476,7 @@ async fn test_writer_reindex_reads_fresh_content_not_stale_cache() {
     // re-warming the cache with the current content.
     let cache = writer.text_data_cache();
     cache.invalidate_all();
-    let warmed = file_indexr::formats::load_file_text_data(cache, &test_file)
+    let warmed = file_indexr::formats::load_file_text_data(cache, &test_file, u64::MAX)
         .await
         .unwrap();
     assert_eq!(warmed.text.as_str(), "original alpha content");

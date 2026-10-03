@@ -295,6 +295,11 @@ impl Config {
     /// with ``OutsideDirectory``. For all other paths, uses ``canonicalize``
     /// to resolve symlinks before comparing against the watched directory.
     pub async fn validate_path(&self, rel_path: &str) -> PathValidateResult {
+        // An empty path would canonicalize to the watched directory itself,
+        // which is never a file.
+        if rel_path.is_empty() {
+            return PathValidateResult::NotFound;
+        }
         // Quick rejection using Path::components — handles both / and \\ on
         // Windows, detects ParentDir (..) and RootDir (absolute paths).
         if std::path::Path::new(rel_path).components().any(|c| {

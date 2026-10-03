@@ -675,8 +675,7 @@ fn test_braceless_item_pending_reset_on_next_item() {
 fn test_single_line_fn_followed_by_closure_no_false_nesting() {
     // `fn helper() {}` opens and closes its block inline, so it must not
     // leave a pending entry; the closure's `{` must not push a false entry.
-    let text =
-        "fn a() {\n    fn helper() {}\n    let f = || {\n        fn inner() {}\n    };\n}\n";
+    let text = "fn a() {\n    fn helper() {}\n    let f = || {\n        fn inner() {}\n    };\n}\n";
     let result = structure(text);
     assert_eq!(result.headers.len(), 3);
     assert_eq!(result.headers[0].text, "a");

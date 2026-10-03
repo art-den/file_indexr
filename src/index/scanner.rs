@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
 use tantivy::schema::{Field, IndexRecordOption, Schema};
-use tantivy::{DocSet, Index, SegmentReader, Term, TERMINATED};
+use tantivy::{DocSet, Index, SegmentReader, TERMINATED, Term};
 use tokio::fs;
 use tokio::sync::mpsc;
 use tracing::{info, warn};

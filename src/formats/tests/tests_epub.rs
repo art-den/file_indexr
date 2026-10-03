@@ -23,7 +23,11 @@ fn image_epub_entries(png_name: &str) -> Vec<(&str, Vec<u8>)> {
 #[test]
 fn test_epub_read_image_entry() {
     let dir = crate::testutil::unique_temp_dir("epub_img_test");
-    let path = image_test_epub(&dir, "book.epub", &image_epub_entries("OEBPS/Text/images/pic.png"));
+    let path = image_test_epub(
+        &dir,
+        "book.epub",
+        &image_epub_entries("OEBPS/Text/images/pic.png"),
+    );
 
     // Document-relative path resolves via the unique suffix.
     let (name, bytes) = read_image_entry(&path, "images/pic.png", 1024).unwrap();
@@ -35,8 +39,7 @@ fn test_epub_read_image_entry() {
     assert_eq!(name, "OEBPS/Text/images/pic.png");
 
     // Leading '/' and '#fragment' are stripped.
-    let (name, _) =
-        read_image_entry(&path, "/OEBPS/Text/images/pic.png#fig", 1024).unwrap();
+    let (name, _) = read_image_entry(&path, "/OEBPS/Text/images/pic.png#fig", 1024).unwrap();
     assert_eq!(name, "OEBPS/Text/images/pic.png");
 
     // Not found.
@@ -62,7 +65,9 @@ fn test_epub_read_image_entry_ambiguous_and_limits() {
     );
 
     // Two suffix matches → ambiguity with candidates.
-    let msg = read_image_entry(&path, "images/pic.png", 1024).unwrap_err().to_string();
+    let msg = read_image_entry(&path, "images/pic.png", 1024)
+        .unwrap_err()
+        .to_string();
     assert!(msg.contains("Ambiguous"));
     assert!(msg.contains("a/images/pic.png"));
     assert!(msg.contains("b/images/pic.png"));
@@ -73,7 +78,9 @@ fn test_epub_read_image_entry_ambiguous_and_limits() {
     assert_eq!(bytes.as_slice(), b"B");
 
     // Size limit (entry is 1 byte, limit 0).
-    let msg = read_image_entry(&path, "a/images/pic.png", 0).unwrap_err().to_string();
+    let msg = read_image_entry(&path, "a/images/pic.png", 0)
+        .unwrap_err()
+        .to_string();
     assert!(msg.contains("too large"));
 
     // Not a zip archive.

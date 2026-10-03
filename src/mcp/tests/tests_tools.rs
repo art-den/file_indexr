@@ -82,37 +82,19 @@ fn test_image_mime_type_supported() {
     use std::path::Path;
     assert_eq!(image_mime_type(Path::new("a.png")).unwrap(), "image/png");
     assert_eq!(image_mime_type(Path::new("a.jpg")).unwrap(), "image/jpeg");
-    assert_eq!(
-        image_mime_type(Path::new("a.jpeg")).unwrap(),
-        "image/jpeg"
-    );
-    assert_eq!(
-        image_mime_type(Path::new("a.gif")).unwrap(),
-        "image/gif"
-    );
-    assert_eq!(
-        image_mime_type(Path::new("a.webp")).unwrap(),
-        "image/webp"
-    );
+    assert_eq!(image_mime_type(Path::new("a.jpeg")).unwrap(), "image/jpeg");
+    assert_eq!(image_mime_type(Path::new("a.gif")).unwrap(), "image/gif");
+    assert_eq!(image_mime_type(Path::new("a.webp")).unwrap(), "image/webp");
     assert_eq!(image_mime_type(Path::new("a.bmp")).unwrap(), "image/bmp");
-    assert_eq!(
-        image_mime_type(Path::new("a.tiff")).unwrap(),
-        "image/tiff"
-    );
+    assert_eq!(image_mime_type(Path::new("a.tiff")).unwrap(), "image/tiff");
     assert_eq!(image_mime_type(Path::new("a.tif")).unwrap(), "image/tiff");
-    assert_eq!(
-        image_mime_type(Path::new("a.ico")).unwrap(),
-        "image/x-icon"
-    );
+    assert_eq!(image_mime_type(Path::new("a.ico")).unwrap(), "image/x-icon");
     assert_eq!(
         image_mime_type(Path::new("a.svg")).unwrap(),
         "image/svg+xml"
     );
     // Extensions are case-insensitive
-    assert_eq!(
-        image_mime_type(Path::new("a.PnG")).unwrap(),
-        "image/png"
-    );
+    assert_eq!(image_mime_type(Path::new("a.PnG")).unwrap(), "image/png");
 }
 
 #[test]

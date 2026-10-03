@@ -12,6 +12,7 @@ use tantivy::{Index, TantivyDocument as Document, Term, doc};
 use tokio::sync::Mutex;
 
 use crate::config::Config;
+use crate::error::AppError;
 use crate::schema;
 
 #[cfg(test)]
@@ -124,13 +125,32 @@ impl DocumentModel {
             })?;
         let modified_dt = chrono_to_tantivy(modified);
 
-        let content = if size <= config.max_file_size_bytes() {
-            crate::formats::load_file_text_data(text_data_cache, resolved_path)
-                .await
-                .ok()
-                .map(|data| data.text)
-        } else {
-            None
+        // Files that fail to load (oversized, unreadable, unsupported) are
+        // indexed without content (has_content = false).
+        let content = match crate::formats::load_file_text_data(
+            text_data_cache,
+            resolved_path,
+            config.max_file_size_bytes(),
+        )
+        .await
+        {
+            Ok(data) => Some(data.text),
+            Err(e) => {
+                // TooLarge/UnsupportedFormat are the expected steady state; log
+                // the rest — a transient I/O failure would otherwise leave the
+                // file contentless with no trace until its next mtime change.
+                if !matches!(
+                    e,
+                    AppError::TooLarge { .. } | AppError::UnsupportedFormat { .. }
+                ) {
+                    tracing::warn!(
+                        file = %resolved_path.display(),
+                        error = %e,
+                        "File content not indexed"
+                    );
+                }
+                None
+            }
         };
         let has_content = content.is_some();
 
@@ -233,12 +253,13 @@ fn apply_delete_item(
                 return false;
             };
             let term = Term::from_field_text(field, path_str);
-            writer.delete_query(Box::new(tantivy::query::TermQuery::new(
-                term,
-                tantivy::schema::IndexRecordOption::Basic,
-            )))
-            .map_err(|e| tracing::error!("writer.delete_query failed: {}", e))
-            .is_ok()
+            writer
+                .delete_query(Box::new(tantivy::query::TermQuery::new(
+                    term,
+                    tantivy::schema::IndexRecordOption::Basic,
+                )))
+                .map_err(|e| tracing::error!("writer.delete_query failed: {}", e))
+                .is_ok()
         }
         Change::DeleteDir(prefix) => {
             let Some(field) = path_exact_field else {

@@ -110,12 +110,17 @@ pub struct SearchResponse {
 ///
 /// When `snippets_as_html` is set, result snippets are HTML with matched terms
 /// wrapped in `<mark>...</mark>` (content HTML-escaped); otherwise plain text.
+///
+/// `max_bytes` bounds snippet generation: a file can grow beyond the indexing
+/// limit after it was indexed, so oversized files are skipped rather than read
+/// into memory (they keep their index entry, just without a snippet).
 pub async fn search(
     reader: &tantivy::IndexReader,
     params: SearchParams,
     watched_dir: &std::path::Path,
     text_data_cache: &crate::formats::TextDataCache,
     snippets_as_html: bool,
+    max_bytes: u64,
 ) -> Result<SearchResponse, SearchError> {
     let start = std::time::Instant::now();
 
@@ -153,6 +158,7 @@ pub async fn search(
                     &raw.path,
                     text_data_cache,
                     snippets_as_html,
+                    max_bytes,
                 )
                 .await
                 .unwrap_or_default()
@@ -485,14 +491,22 @@ async fn generate_snippet_from_file(
     rel_path: &str,
     text_data_cache: &crate::formats::TextDataCache,
     snippets_as_html: bool,
+    max_bytes: u64,
 ) -> Option<String> {
     let snippet_gen = snippet_gen?;
 
-    // Load and normalize content via formats module.
+    // Load and normalize content via formats module. One unreadable file must
+    // not fail the search; TooLarge is routine (files can grow past the limit
+    // after indexing), so debug level.
     let full_path = watched_dir.join(rel_path);
-    let Ok(format) = crate::formats::load_file_text_data(text_data_cache, &full_path).await else {
-        return None;
-    };
+    let format =
+        match crate::formats::load_file_text_data(text_data_cache, &full_path, max_bytes).await {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::debug!(path = %full_path.display(), error = %e, "Snippet skipped");
+                return None;
+            }
+        };
 
     let mut snippet = snippet_gen.snippet(&format.text);
     if snippets_as_html {

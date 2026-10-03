@@ -25,8 +25,7 @@ fn test_parse_notification() {
 #[test]
 fn test_parse_request_with_null_id() {
     // "id": null is still a Request (the key is present), not a Notification.
-    let body =
-        r#"{"jsonrpc":"2.0","id":null,"method":"notifications/initialized","params":{}}"#;
+    let body = r#"{"jsonrpc":"2.0","id":null,"method":"notifications/initialized","params":{}}"#;
     let msg = parse_message(body.as_bytes()).unwrap();
     match msg {
         Message::Request(req) => {

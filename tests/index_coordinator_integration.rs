@@ -276,6 +276,7 @@ async fn test_startup_scan_reindexes_modified_file_after_restart() {
             &config.directory,
             cache,
             false,
+            u64::MAX,
         )
         .await
         .unwrap()
@@ -286,8 +287,7 @@ async fn test_startup_scan_reindexes_modified_file_after_restart() {
     // Modify the file while the app is offline and make its mtime strictly
     // newer than the stored one (filetime converts via SystemTime).
     std::fs::write(&path, "existing file updated zebra content").unwrap();
-    let future: std::time::SystemTime =
-        (chrono::Utc::now() + chrono::Duration::minutes(1)).into();
+    let future: std::time::SystemTime = (chrono::Utc::now() + chrono::Duration::minutes(1)).into();
     filetime::set_file_mtime(&path, future.into()).unwrap();
 
     // Second startup — the modified file must be re-indexed
@@ -311,7 +311,11 @@ async fn test_startup_scan_reindexes_modified_file_after_restart() {
                 &tantivy::collector::TopDocs::with_limit(10).order_by_score(),
             )
             .unwrap();
-        assert_eq!(results.len(), 1, "Expected 1 document after reindex (no duplicate)");
+        assert_eq!(
+            results.len(),
+            1,
+            "Expected 1 document after reindex (no duplicate)"
+        );
 
         // The new content is what is stored; the stale content is gone.
         let cache = coordinator.writer().text_data_cache();
@@ -324,6 +328,7 @@ async fn test_startup_scan_reindexes_modified_file_after_restart() {
             &config.directory,
             cache,
             false,
+            u64::MAX,
         )
         .await
         .unwrap()
@@ -339,6 +344,7 @@ async fn test_startup_scan_reindexes_modified_file_after_restart() {
             &config.directory,
             cache,
             false,
+            u64::MAX,
         )
         .await
         .unwrap()
@@ -384,6 +390,7 @@ async fn test_startup_scan_removes_deleted_file_after_restart() {
             &config.directory,
             cache,
             false,
+            u64::MAX,
         )
         .await
         .unwrap()
@@ -431,6 +438,7 @@ async fn test_startup_scan_removes_deleted_file_after_restart() {
             &config.directory,
             cache,
             false,
+            u64::MAX,
         )
         .await
         .unwrap()
@@ -449,6 +457,7 @@ async fn test_startup_scan_removes_deleted_file_after_restart() {
             &config.directory,
             cache,
             false,
+            u64::MAX,
         )
         .await
         .unwrap()

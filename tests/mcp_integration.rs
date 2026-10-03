@@ -4,10 +4,10 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::Request;
 use axum::http::StatusCode;
+use base64::Engine;
 use file_indexr::config::Config;
 use file_indexr::index::writer::IndexWriterWrapper;
 use file_indexr::mcp::jsonrpc::{INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR};
-use base64::Engine;
 use file_indexr::{AppState, api::create_router, mcp};
 use serde_json::json;
 
@@ -16,8 +16,7 @@ fn make_temp_dir() -> PathBuf {
 }
 
 /// A minimal valid 1x1 PNG, base64-encoded.
-const TEST_PNG_B64: &str =
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+const TEST_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
 /// Build a minimal EPUB whose document references `images/pic.png` relative
 /// to its own location; the actual archive entry is `OEBPS/Text/images/pic.png`
@@ -53,7 +52,9 @@ fn build_epub_bytes(png: &[u8]) -> Vec<u8> {
         writer.start_file(name, options).unwrap();
         writer.write_all(content).unwrap();
     }
-    writer.start_file("OEBPS/Text/images/pic.png", options).unwrap();
+    writer
+        .start_file("OEBPS/Text/images/pic.png", options)
+        .unwrap();
     writer.write_all(png).unwrap();
     writer.finish().unwrap().into_inner()
 }
@@ -135,7 +136,9 @@ async fn make_test_state() -> AppState {
     std::fs::write(watch_dir.join("large.txt"), &large_content).unwrap();
 
     // 1x1 PNG for image tool testing
-    let png = base64::engine::general_purpose::STANDARD.decode(TEST_PNG_B64).unwrap();
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(TEST_PNG_B64)
+        .unwrap();
     std::fs::write(watch_dir.join("pixel.png"), &png).unwrap();
     // EPUB containing that image for virtual-path testing
     std::fs::write(watch_dir.join("book.epub"), build_epub_bytes(&png)).unwrap();
@@ -368,7 +371,10 @@ async fn test_mcp_tools_call_docs_search_empty_query() {
 
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
+    // An empty (but present) query is a tool execution failure, not a
+    // protocol error: isError result, no JSON-RPC error.
     assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
 
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("empty"));
@@ -416,13 +422,14 @@ async fn test_mcp_tools_call_docs_search_whitespace_query() {
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
     assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
 
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("empty"));
 }
 
 // ============================================================================
-// POST /mcp — tools/call docs_headings
+// POST /mcp — tools/call docs_get
 // ============================================================================
 
 #[tokio::test]
@@ -471,9 +478,12 @@ async fn test_mcp_tools_call_docs_headings_file_not_found() {
 
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["error"].is_object());
+    // Per the MCP spec, tool execution errors are results with
+    // isError: true, not JSON-RPC protocol errors.
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
     assert!(
-        resp["error"]["message"]
+        resp["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("not found")
@@ -499,9 +509,12 @@ async fn test_mcp_tools_call_docs_headings_path_traversal() {
 
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["error"].is_object());
+    // Per the MCP spec, tool execution errors are results with
+    // isError: true, not JSON-RPC protocol errors.
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
     assert!(
-        resp["error"]["message"]
+        resp["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("outside")
@@ -527,9 +540,12 @@ async fn test_mcp_tools_call_docs_headings_absolute_path() {
 
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["error"].is_object());
+    // Per the MCP spec, tool execution errors are results with
+    // isError: true, not JSON-RPC protocol errors.
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
     assert!(
-        resp["error"]["message"]
+        resp["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("outside")
@@ -667,9 +683,12 @@ async fn test_mcp_tools_call_docs_get_path_traversal() {
 
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["error"].is_object());
+    // Per the MCP spec, tool execution errors are results with
+    // isError: true, not JSON-RPC protocol errors.
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
     assert!(
-        resp["error"]["message"]
+        resp["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("outside")
@@ -695,9 +714,12 @@ async fn test_mcp_tools_call_docs_get_absolute_path() {
 
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["error"].is_object());
+    // Per the MCP spec, tool execution errors are results with
+    // isError: true, not JSON-RPC protocol errors.
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
     assert!(
-        resp["error"]["message"]
+        resp["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("outside")
@@ -707,6 +729,66 @@ async fn test_mcp_tools_call_docs_get_absolute_path() {
 // ============================================================================
 // POST /mcp — unknown tool
 // ============================================================================
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_directory() {
+    let state = make_test_state().await;
+    let watch_dir = state.config.directory.clone();
+    std::fs::create_dir(watch_dir.join("subdir")).unwrap();
+    let router = create_router(state);
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "dg_dir",
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": "subdir"
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
+    assert!(
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not a regular file")
+    );
+}
+
+#[tokio::test]
+async fn test_mcp_tools_call_docs_get_empty_path() {
+    let state = make_test_state().await;
+    let router = create_router(state);
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": "dg_empty",
+        "method": "tools/call",
+        "params": {
+            "name": "docs_get",
+            "arguments": {
+                "path": ""
+            }
+        }
+    });
+
+    let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
+    assert!(
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("file not found")
+    );
+}
 
 #[tokio::test]
 async fn test_mcp_tools_call_docs_get_image() {
@@ -761,8 +843,16 @@ async fn test_mcp_tools_call_docs_get_image_too_large() {
 
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["error"].is_object());
-    assert!(resp["error"]["message"].as_str().unwrap().contains("too large"));
+    // Per the MCP spec, tool execution errors are results with
+    // isError: true, not JSON-RPC protocol errors.
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
+    assert!(
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("too large")
+    );
 }
 
 #[tokio::test]
@@ -904,7 +994,11 @@ async fn test_mcp_tools_call_docs_get_epub_image_end_to_end() {
     });
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["error"].is_null(), "unexpected error: {}", resp["error"]);
+    assert!(
+        resp["error"].is_null(),
+        "unexpected error: {}",
+        resp["error"]
+    );
 
     // The served bytes must be the PNG stored inside the archive.
     assert_image_item(
@@ -933,9 +1027,12 @@ async fn test_mcp_tools_call_docs_get_epub_image_not_found() {
 
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["error"].is_object());
+    // Per the MCP spec, tool execution errors are results with
+    // isError: true, not JSON-RPC protocol errors.
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
     assert!(
-        resp["error"]["message"]
+        resp["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("not found in EPUB archive")
@@ -965,13 +1062,17 @@ async fn test_mcp_tools_call_docs_get_indexed_epub_image() {
         &state.config.directory,
         &state.text_data_cache,
         false,
+        u64::MAX,
     )
     .await
     .unwrap();
     assert!(
         res.results.iter().any(|r| r.path == "book.epub"),
         "book.epub was not indexed; got: {:?}",
-        res.results.iter().map(|r| r.path.as_str()).collect::<Vec<_>>()
+        res.results
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect::<Vec<_>>()
     );
 
     // The image must be fetchable through the virtual path after indexing.
@@ -994,7 +1095,9 @@ async fn test_mcp_tools_call_docs_get_indexed_epub_image() {
     assert_image_item(
         &resp["result"]["content"][0],
         "image/png",
-        &base64::engine::general_purpose::STANDARD.decode(TEST_PNG_B64).unwrap(),
+        &base64::engine::general_purpose::STANDARD
+            .decode(TEST_PNG_B64)
+            .unwrap(),
     );
 }
 
@@ -1019,12 +1122,15 @@ async fn test_mcp_tools_call_docs_get_epub_virtual_rejects_non_image() {
 
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["error"].is_object());
+    // Per the MCP spec, tool execution errors are results with
+    // isError: true, not JSON-RPC protocol errors.
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
     assert!(
-        resp["error"]["message"]
+        resp["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("Unsupported image format")
+            .contains("Unsupported format: xhtml")
     );
 }
 
@@ -1038,7 +1144,9 @@ async fn test_mcp_tools_call_docs_get_epub_dir_falls_through_to_disk() {
     std::fs::create_dir(watch_dir.join("fake.epub")).unwrap();
     std::fs::write(
         watch_dir.join("fake.epub/pic.png"),
-        base64::engine::general_purpose::STANDARD.decode(TEST_PNG_B64).unwrap(),
+        base64::engine::general_purpose::STANDARD
+            .decode(TEST_PNG_B64)
+            .unwrap(),
     )
     .unwrap();
     let router = create_router(state);
@@ -1084,12 +1192,15 @@ async fn test_mcp_tools_call_docs_get_epub_missing_archive() {
 
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["error"].is_object());
+    // Per the MCP spec, tool execution errors are results with
+    // isError: true, not JSON-RPC protocol errors.
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
     assert!(
-        resp["error"]["message"]
+        resp["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("File not found")
+            .contains("file not found")
     );
 }
 
@@ -1114,9 +1225,12 @@ async fn test_mcp_tools_call_docs_get_unsupported_format() {
 
     let (status, resp) = call_post(router, "/mcp", body.to_string()).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(resp["error"].is_object());
+    // Per the MCP spec, tool execution errors are results with
+    // isError: true, not JSON-RPC protocol errors.
+    assert!(resp["error"].is_null());
+    assert_eq!(resp["result"]["isError"], true);
     assert!(
-        resp["error"]["message"]
+        resp["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("Unsupported format")

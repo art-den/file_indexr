@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use tantivy::{Index, SegmentReader, Term};
 use tantivy::schema::Field;
+use tantivy::{Index, SegmentReader, Term};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
@@ -98,7 +98,10 @@ fn test_indexed_mtime_in_index_ignores_deleted_docs() {
         indexed_mtime_in_index(&segments, field, "a.txt").unwrap(),
         Some(NS)
     );
-    assert_eq!(indexed_mtime_in_index(&segments, field, "b.txt").unwrap(), None);
+    assert_eq!(
+        indexed_mtime_in_index(&segments, field, "b.txt").unwrap(),
+        None
+    );
 
     // Delete the doc: the FST keeps the phantom term, only the alive
     // bitset marks the doc as deleted.
@@ -113,7 +116,10 @@ fn test_indexed_mtime_in_index_ignores_deleted_docs() {
     let reader = index.reader().unwrap();
     let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
     // The phantom term must NOT count as indexed.
-    assert_eq!(indexed_mtime_in_index(&segments, field, "a.txt").unwrap(), None);
+    assert_eq!(
+        indexed_mtime_in_index(&segments, field, "a.txt").unwrap(),
+        None
+    );
 
     // Re-adding the path (new doc in a new segment) must be found again.
     {
@@ -192,14 +198,16 @@ async fn test_needs_indexing_mtime_comparison() {
     {
         let reader = index.reader().unwrap();
         let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
-        assert!(needs_indexing(
-            std::path::Path::new("/nonexistent"),
-            &segments,
-            field,
-            "a.txt"
-        )
-        .await
-        .unwrap());
+        assert!(
+            needs_indexing(
+                std::path::Path::new("/nonexistent"),
+                &segments,
+                field,
+                "a.txt"
+            )
+            .await
+            .unwrap()
+        );
     }
 
     // Index "a.txt" with mtime exactly X_NS.
@@ -233,15 +241,27 @@ async fn test_needs_indexing_mtime_comparison() {
 
     // mtime == indexed mtime: unchanged -> no reindex.
     set_mtime(&path, X_NS);
-    assert!(!needs_indexing(&path, &segments, field, "a.txt").await.unwrap());
+    assert!(
+        !needs_indexing(&path, &segments, field, "a.txt")
+            .await
+            .unwrap()
+    );
 
     // mtime strictly newer -> reindex.
     set_mtime(&path, X_NS + 1);
-    assert!(needs_indexing(&path, &segments, field, "a.txt").await.unwrap());
+    assert!(
+        needs_indexing(&path, &segments, field, "a.txt")
+            .await
+            .unwrap()
+    );
 
     // mtime rolled back (older than indexed) -> no reindex (strict >).
     set_mtime(&path, X_NS - 1);
-    assert!(!needs_indexing(&path, &segments, field, "a.txt").await.unwrap());
+    assert!(
+        !needs_indexing(&path, &segments, field, "a.txt")
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -262,15 +282,20 @@ async fn test_needs_indexing_reindexes_when_modified_value_missing() {
 
     let reader = index.reader().unwrap();
     let segments: Vec<SegmentReader> = reader.searcher().segment_readers().to_vec();
-    assert_eq!(indexed_mtime_in_index(&segments, field, "a.txt").unwrap(), None);
-    assert!(needs_indexing(
-        std::path::Path::new("/nonexistent"),
-        &segments,
-        field,
-        "a.txt"
-    )
-    .await
-    .unwrap());
+    assert_eq!(
+        indexed_mtime_in_index(&segments, field, "a.txt").unwrap(),
+        None
+    );
+    assert!(
+        needs_indexing(
+            std::path::Path::new("/nonexistent"),
+            &segments,
+            field,
+            "a.txt"
+        )
+        .await
+        .unwrap()
+    );
 }
 
 #[test]

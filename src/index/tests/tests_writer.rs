@@ -1,4 +1,7 @@
-use std::{path::{Path, PathBuf}, sync::{Arc, atomic::Ordering}};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, atomic::Ordering},
+};
 
 use super::*;
 
