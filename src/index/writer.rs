@@ -430,7 +430,8 @@ impl IndexWriterWrapper {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to build document: {}", e))?;
 
-        tracing::info!(file = ?path, "Buffered file for indexing");
+        // Per-file log: keep at trace level to avoid flooding the log on large scans.
+        tracing::trace!(file = ?path, "Buffered file for indexing");
         // Delete existing document with the same path to avoid duplicates on re-index
         self.buffer_changes([
             ChangeItem::new(Change::Delete(rel_path)),
@@ -447,7 +448,7 @@ impl IndexWriterWrapper {
         // Path must be inside watched directory and valid UTF-8.
         let rel_path = self.canonical_relative_path(&path).await?;
 
-        tracing::info!(path = ?path, "Buffered file for deletion");
+        tracing::trace!(path = ?path, "Buffered file for deletion");
         self.buffer_changes([ChangeItem::new(Change::Delete(rel_path))])
             .await;
 
@@ -462,7 +463,7 @@ impl IndexWriterWrapper {
         let rel_path = self.canonical_relative_path(&path).await?;
 
         let prefix = format!("{}/", rel_path);
-        tracing::info!(prefix = %prefix, "Buffered directory prefix for deletion");
+        tracing::trace!(prefix = %prefix, "Buffered directory prefix for deletion");
         self.buffer_changes([ChangeItem::new(Change::DeleteDir(prefix))])
             .await;
 
