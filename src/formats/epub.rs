@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Cursor, Read, Seek};
+use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -43,18 +43,13 @@ static OPF_PATTERNS: LazyLock<OpfPatterns> = LazyLock::new(|| OpfPatterns {
     title: Regex::new(r"<(?:[\w-]+:)?title[^>]*>(.*?)</(?:[\w-]+:)?title>").unwrap(),
 });
 
-/// Strips XML tags and decodes the five predefined XML entities in a single
-/// left-to-right pass; tags are replaced with a space so adjacent words stay
-/// separated.
-static TITLE_CLEANUP: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<[^>]+>|&lt;|&gt;|&quot;|&apos;|&amp;").unwrap());
-
 /// Load EPUB file and convert to Markdown.
 pub async fn load_from_file_and_convert_to_md(file_path: &Path) -> anyhow::Result<String> {
     let path = file_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let buffer = std::fs::read(&path)?;
-        to_markdown(&buffer)
+        // Seek-based reads: the whole archive is never held in memory.
+        let file = std::fs::File::open(&path)?;
+        to_markdown(file)
     })
     .await?
 }
@@ -90,37 +85,36 @@ pub fn read_image_entry(
     }
 
     // Entry names are opaque zip strings and cannot escape the archive.
-    let names: Vec<String> = (0..archive.len())
-        .filter_map(|i| archive.by_index(i).ok().map(|e| e.name().to_string()))
-        .collect();
-
-    // 1) Literal match. 2) Unique suffix match.
-    let resolved = if let Some(name) = names.iter().find(|n| n.as_str() == target) {
-        name.clone()
-    } else {
-        let suffix = format!("/{target}");
-        let matches: Vec<&str> = names
-            .iter()
-            .filter(|n| n.ends_with(&suffix))
-            .map(|s| s.as_str())
-            .collect();
-        match matches.len() {
-            0 => {
-                return Err(anyhow::anyhow!(
-                    "Image '{inner_path}' not found in EPUB archive"
-                ));
-            }
-            1 => matches[0].to_string(),
-            n => {
-                let shown = matches
-                    .iter()
-                    .take(MAX_CANDIDATES_SHOWN)
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(anyhow::anyhow!(
-                    "Ambiguous image path '{inner_path}' in EPUB archive: {n} candidates ({shown})"
-                ));
+    // 1) Literal match via the archive's name index. 2) Unique suffix match
+    // over the central directory (candidates keep archive order).
+    let resolved = match archive.index_for_name(target) {
+        Some(_) => target.to_string(),
+        None => {
+            let suffix = format!("/{target}");
+            let matches: Vec<String> = archive
+                .file_names()
+                .filter(|name| name.ends_with(&suffix))
+                .map(str::to_string)
+                .collect();
+            match matches.as_slice() {
+                [] => {
+                    return Err(anyhow::anyhow!(
+                        "Image '{inner_path}' not found in EPUB archive"
+                    ));
+                }
+                [name] => name.clone(),
+                many => {
+                    let shown = many
+                        .iter()
+                        .take(MAX_CANDIDATES_SHOWN)
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(anyhow::anyhow!(
+                        "Ambiguous image path '{inner_path}' in EPUB archive: {} candidates ({shown})",
+                        many.len()
+                    ));
+                }
             }
         }
     };
@@ -153,17 +147,18 @@ pub fn read_image_entry(
 }
 
 /// Extract the EPUB spine documents in reading order and convert them to Markdown.
-fn to_markdown(buffer: &[u8]) -> anyhow::Result<String> {
-    let mut archive = ZipArchive::new(Cursor::new(buffer))?;
+fn to_markdown(reader: impl Read + Seek) -> anyhow::Result<String> {
+    let mut archive = ZipArchive::new(reader)?;
 
     // OPC container points to the OPF package file (usually "OEBPS/content.opf").
     let container = read_entry(&mut archive, CONTAINER_PATH)?;
     let opf_path = container_rootfile(&container)?;
     let opf = read_entry(&mut archive, &opf_path)?;
     let (manifest, spine) = parse_opf(&opf)?;
-    let opf_dir = Path::new(&opf_path)
-        .parent()
-        .map(|p| p.to_string_lossy().into_owned())
+    // Directory of the OPF: everything before the last path separator.
+    let opf_dir = opf_path
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
         .unwrap_or_default();
 
     let mut out = String::new();
@@ -180,7 +175,7 @@ fn to_markdown(buffer: &[u8]) -> anyhow::Result<String> {
         if !item.html {
             continue;
         }
-        let entry = resolve_entry_path(&opf_dir, &item.href);
+        let entry = resolve_entry_path(opf_dir, &item.href);
         let Ok(html_bytes) = read_entry_bytes(&mut archive, &entry) else {
             warn!("EPUB spine entry '{entry}' is missing from the archive");
             continue;
@@ -236,8 +231,9 @@ fn parse_opf(xml: &str) -> anyhow::Result<(HashMap<String, OpfItem>, Vec<String>
         let (Some(id), Some(href)) = (attr(tag, "id"), attr(tag, "href")) else {
             continue;
         };
+        // Media types never contain entities, so no unescaping is needed.
         let html = matches!(
-            attr(tag, "media-type").as_deref(),
+            attr_raw(tag, "media-type"),
             Some("application/xhtml+xml" | "text/html")
         );
         manifest.insert(id, OpfItem { href, html });
@@ -259,17 +255,14 @@ fn parse_opf(xml: &str) -> anyhow::Result<(HashMap<String, OpfItem>, Vec<String>
 /// Book title from the OPF `<metadata>` element, if present.
 fn parse_title(opf: &str) -> Option<String> {
     let inner = OPF_PATTERNS.title.captures(opf)?.get(1)?;
-    let cleaned = TITLE_CLEANUP.replace_all(inner.as_str(), |c: &regex::Captures| {
-        match c.get(0).unwrap().as_str() {
-            "&lt;" => "<",
-            "&gt;" => ">",
-            "&quot;" => "\"",
-            "&apos;" => "'",
-            "&amp;" => "&",
-            _ => " ", // XML tag
-        }
-    });
-    let text = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Tags first (replaced with a space so adjacent words stay separated),
+    // then entities: decoding last keeps entity-escaped markup (`&lt;b&gt;`)
+    // from being mistaken for a tag.
+    let stripped = XML_TAGS.replace_all(inner.as_str(), " ");
+    let text = unescape_xml(&stripped)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     (!text.is_empty()).then_some(text)
 }
 
@@ -331,18 +324,27 @@ fn element_region<'a>(xml: &'a str, tag: &str) -> anyhow::Result<&'a str> {
     Ok(&xml[open..open + close_rel])
 }
 
-/// Extract an attribute value from an opening tag, handling both quote styles
-/// and unescaping XML entities in the value.
-fn attr(tag: &str, name: &str) -> Option<String> {
+/// Raw (not entity-unescaped) attribute value of an opening tag, both quote
+/// styles supported.
+fn attr_raw<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let re = ATTR_REGEXES.get(name)?;
     re.captures(tag)
         .and_then(|c| c.get(1).or(c.get(2)))
-        .map(|m| unescape_xml(m.as_str()))
+        .map(|m| m.as_str())
+}
+
+/// Extract an attribute value from an opening tag, handling both quote styles
+/// and unescaping XML entities in the value.
+fn attr(tag: &str, name: &str) -> Option<String> {
+    attr_raw(tag, name).map(unescape_xml)
 }
 
 /// The five predefined XML entities, decoded left-to-right in a single pass.
 static XML_ENTITIES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"&lt;|&gt;|&quot;|&apos;|&amp;").unwrap());
+
+/// XML tags, stripped from text where markup must not survive (book titles).
+static XML_TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").unwrap());
 
 fn unescape_xml(s: &str) -> String {
     XML_ENTITIES

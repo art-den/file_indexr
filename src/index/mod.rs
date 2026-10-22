@@ -91,15 +91,7 @@ impl IndexCoordinator {
         let (tx, mut rx) = mpsc::channel(CHANGE_CHANNEL_CAPACITY);
         let (watcher, debouncer_handle) = spawn_watcher(&self.config, tx).await?;
 
-        let batch_timeout = Duration::from_millis(self.config.batch_timeout_ms);
-        event_loop(
-            &self.writer,
-            &self.config,
-            &mut rx,
-            batch_timeout,
-            &mut shutdown_rx,
-        )
-        .await;
+        event_loop(&self.writer, &self.config, &mut rx, &mut shutdown_rx).await;
 
         // Release the notify watcher: dropping it disconnects notify's channel,
         // which lets the watcher thread exit, which closes the bridge and makes
@@ -151,9 +143,9 @@ async fn event_loop(
     writer: &IndexWriterWrapper,
     config: &Arc<Config>,
     rx: &mut mpsc::Receiver<FileChange>,
-    batch_timeout: Duration,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) {
+    let batch_timeout = Duration::from_millis(config.batch_timeout_ms);
     let mut commit_timer = tokio::time::interval(batch_timeout);
     commit_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -185,16 +177,13 @@ async fn event_loop(
 }
 
 /// Commit buffered changes, logging (not propagating) non-applied outcomes.
-/// Returns true only if the buffer was empty or fully committed.
-async fn commit_or_log(writer: &IndexWriterWrapper, context: &str) -> bool {
-    let applied = writer.commit().await;
-    if !applied {
+async fn commit_or_log(writer: &IndexWriterWrapper, context: &str) {
+    if !writer.commit().await {
         // Failed `Delete`/`DeleteDir` changes are requeued for retry (or
         // dropped after MAX_RETRY_COUNT); dropped `Add`s are re-indexed on
         // the next startup via stale-mtime detection. Warn, not error.
         warn!("{context} — changes not applied");
     }
-    applied
 }
 
 /// Process a single file change, logging (not propagating) failures.

@@ -124,24 +124,23 @@ pub async fn search(
 ) -> Result<SearchResponse, SearchError> {
     let start = std::time::Instant::now();
 
-    // Blocking reload is offloaded to a dedicated thread pool so the
-    // tokio worker is not starved when the index has many sections.
-    let reader_clone = reader.clone();
-    tokio::task::spawn_blocking(move || reader_clone.reload())
-        .await
-        .map_err(|e| SearchError::Internal(format!("reload task failed: {}", e)))?
-        .map_err(|e| SearchError::Internal(format!("reload failed: {}", e)))?;
-
-    let searcher = reader.searcher();
-
     let limit = params.max_results.clamp(1, MAX_RESULTS_LIMIT);
 
-    // The whole synchronous search phase (query building, hit count, top docs,
-    // stored-field reads) is CPU-heavy and runs on the blocking pool so the
-    // tokio workers stay responsive for the HTTP server, watcher, and MCP.
-    let phase = tokio::task::spawn_blocking(move || run_search_phase(&searcher, &params, limit))
-        .await
-        .map_err(|e| SearchError::Internal(format!("search task failed: {e}")))?;
+    // Reload and the synchronous search phase (query building, hit count, top
+    // docs, stored-field reads) are blocking/CPU-heavy, so they run together on
+    // the blocking pool as a single task, keeping tokio workers responsive for
+    // the HTTP server, watcher, and MCP. `reload()` updates the reader's shared
+    // searcher, so `searcher()` afterward reflects freshly committed data.
+    let reader_clone = reader.clone();
+    let phase = tokio::task::spawn_blocking(move || {
+        reader_clone
+            .reload()
+            .map_err(|e| SearchError::Internal(format!("reload failed: {e}")))?;
+        let searcher = reader_clone.searcher();
+        run_search_phase(&searcher, &params, limit)
+    })
+    .await
+    .map_err(|e| SearchError::Internal(format!("search task failed: {e}")))?;
     let (total_hits, raw_items, snippet_gen) = phase?;
 
     // Generate snippets with bounded concurrency: each item's PDF/HTML/EPUB

@@ -16,7 +16,6 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use itertools::Itertools;
 use serde_json::json;
 use tracing::warn;
 
@@ -169,23 +168,29 @@ pub async fn mcp_get_handler() -> Response {
 
 /// Log an incoming MCP request with transport tag.
 fn log_mcp_request(method: &str, params: &serde_json::Value, transport: &str) {
-    if method == "tools/call" {
-        let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-        let args_str = params
-            .get("arguments")
-            .and_then(|a| a.as_object())
-            .map(|args| {
-                let parts = args
-                    .iter()
-                    .filter_map(|(k, v)| compact_value(v).map(|val| format!("{k}={val}")))
-                    .join(", ");
-                format!(" ({parts})")
-            })
-            .unwrap_or_default();
-        tracing::info!(method = %method, ?tool_name, %args_str, "MCP request [{transport}]");
-    } else {
+    if method != "tools/call" {
         tracing::info!(method = %method, "MCP request [{transport}]");
+        return;
     }
+    let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+    // Scalar arguments are logged as ` (k=v, ...)`; a non-object `arguments`
+    // (or a missing one) logs nothing.
+    let mut args_str = String::new();
+    if let Some(args) = params.get("arguments").and_then(|a| a.as_object()) {
+        let mut parts = String::new();
+        for (k, v) in args {
+            if let Some(val) = compact_value(v) {
+                if !parts.is_empty() {
+                    parts.push_str(", ");
+                }
+                parts.push_str(k);
+                parts.push('=');
+                parts.push_str(&val);
+            }
+        }
+        args_str = format!(" ({parts})");
+    }
+    tracing::info!(method = %method, ?tool_name, %args_str, "MCP request [{transport}]");
 }
 
 // ============================================================================

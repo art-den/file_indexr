@@ -1,16 +1,14 @@
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, atomic::Ordering},
 };
 
+use crate::testutil::unique_temp_dir;
+
 use super::*;
 
-fn make_test_temp_dir(kind: &str) -> PathBuf {
-    crate::testutil::unique_temp_dir(&format!("unit_test_{kind}"))
-}
-
-fn make_test_config(watch_dir: &Path, index_dir: &Path) -> Config {
-    Config {
+fn make_test_config(watch_dir: &Path, index_dir: &Path) -> Arc<Config> {
+    Arc::new(Config {
         directory: watch_dir.to_path_buf(),
         index_path: index_dir.to_path_buf(),
         port: 8080,
@@ -19,7 +17,7 @@ fn make_test_config(watch_dir: &Path, index_dir: &Path) -> Config {
         batch_size: 500,
         batch_timeout_ms: 1000,
         allowed_extensions: vec![],
-    }
+    })
 }
 
 /// Create three files in `watch_dir` and buffer them for indexing
@@ -89,9 +87,9 @@ fn test_requeue_failed_drops_at_max_retry_count() {
 
 #[tokio::test]
 async fn test_commit_task_panic_drops_batch() {
-    let watch_dir = make_test_temp_dir("watch");
-    let index_dir = make_test_temp_dir("index");
-    let config = Arc::new(make_test_config(&watch_dir, &index_dir));
+    let watch_dir = unique_temp_dir("unit_test_watch");
+    let index_dir = unique_temp_dir("unit_test_index");
+    let config = make_test_config(&watch_dir, &index_dir);
 
     let writer = IndexWriterWrapper::new(
         &index_dir,

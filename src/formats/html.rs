@@ -56,8 +56,7 @@ pub(super) fn decode_html_to_utf8(bytes: &[u8]) -> Cow<'_, str> {
     }
 
     let (encoding, payload) = detect_encoding(bytes);
-    let (cow, _, _) = encoding.decode(payload);
-    cow
+    encoding.decode(payload).0
 }
 
 /// Resolve the encoding for a non-UTF-8 buffer and the byte slice to decode.
@@ -67,19 +66,18 @@ fn detect_encoding(bytes: &[u8]) -> (&'static encoding_rs::Encoding, &[u8]) {
         return (encoding, &bytes[bom_len..]);
     }
 
-    // `_no_replacement` so an unrecognized label hits the Windows-1252 fallback
-    // rather than decoding with the replacement (all-U+FFFD) encoding.
-    let encoding = declared_charset(bytes)
-        .and_then(|label| encoding_rs::Encoding::for_label_no_replacement(label.as_bytes()))
+    // Honor an inline `<meta>` charset declared in the head (sniffed within
+    // `CHARSET_SNIFF_LIMIT`). `_no_replacement` so an unrecognized label hits the
+    // Windows-1252 fallback rather than decoding with the replacement (all-U+FFFD)
+    // encoding. Labels are pure ASCII, so the raw capture bytes can be matched
+    // directly without an owned UTF-8 copy.
+    let head = &bytes[..bytes.len().min(CHARSET_SNIFF_LIMIT)];
+    let encoding = META_CHARSET_RE
+        .captures(head)
+        .and_then(|caps| {
+            let label = caps.get(1)?;
+            encoding_rs::Encoding::for_label_no_replacement(label.as_bytes())
+        })
         .unwrap_or(encoding_rs::WINDOWS_1252);
     (encoding, bytes)
-}
-
-/// Look up a charset declared in the document head, if any.
-fn declared_charset(bytes: &[u8]) -> Option<String> {
-    let head = &bytes[..bytes.len().min(CHARSET_SNIFF_LIMIT)];
-
-    META_CHARSET_RE
-        .captures(head)
-        .map(|m| String::from_utf8_lossy(&m[1]).into_owned())
 }

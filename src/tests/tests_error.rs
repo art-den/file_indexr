@@ -73,34 +73,36 @@ fn test_unsupported_format() {
 
 #[test]
 fn test_display_messages() {
-    assert_eq!(
-        AppError::NotFound {
-            path: "a.txt".into()
-        }
-        .to_string(),
-        "file not found: a.txt"
-    );
-    assert_eq!(
-        AppError::OutsideDirectory {
-            path: "../x".into()
-        }
-        .to_string(),
-        "path is outside the watched directory: ../x"
-    );
-    assert_eq!(
-        AppError::NotAFile { path: "d".into() }.to_string(),
-        "not a regular file: d"
-    );
-    assert_eq!(
-        AppError::too_large(10, 5).to_string(),
-        "file is too large: 10 bytes (limit 5 bytes)"
-    );
-    assert_eq!(
-        AppError::Io {
-            path: "a.txt".into(),
-            source: std::io::Error::other("boom"),
-        }
-        .to_string(),
-        "failed to read a.txt: boom"
-    );
+    let cases = [
+        (
+            AppError::NotFound {
+                path: "a.txt".into(),
+            },
+            "file not found: a.txt",
+        ),
+        (
+            AppError::OutsideDirectory {
+                path: "../x".into(),
+            },
+            "path is outside the watched directory: ../x",
+        ),
+        (
+            AppError::NotAFile { path: "d".into() },
+            "not a regular file: d",
+        ),
+        (
+            AppError::too_large(10, 5),
+            "file is too large: 10 bytes (limit 5 bytes)",
+        ),
+        (
+            AppError::Io {
+                path: "a.txt".into(),
+                source: std::io::Error::other("boom"),
+            },
+            "failed to read a.txt: boom",
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(error.to_string(), expected);
+    }
 }

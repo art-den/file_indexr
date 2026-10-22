@@ -346,7 +346,9 @@ fn emit_delete_for_rename(path: &Path, changes: &mut Vec<FileChange>) {
 /// `DeletedDir`); each is a no-op for the wrong type.
 ///
 /// `watched_dir`/`index_path` are passed down so that expensive directory
-/// walks are skipped for excluded paths *before* they happen. Rename pairs
+/// walks are skipped for excluded paths *before* they happen; non-rename
+/// paths are also filtered via `should_skip_path` before any processing
+/// (their changes would be dropped by `process_event` anyway). Rename pairs
 /// are consumed as (from, to) via `as_chunks::<2>()`, so the skip check must
 /// never remove paths from `event.paths` itself — that would break the
 /// pairing and could delete a live `to` path.
@@ -390,8 +392,15 @@ async fn event_to_changes(event: &Event, watched_dir: &Path, index_path: &Path) 
             }
         }
     } else {
-        // Non-rename events: process each path independently
+        // Non-rename events: process each path independently. Skip excluded
+        // paths (index dir, hidden components) up front: every change
+        // `path_to_change` can emit for such a path carries that same path,
+        // so `process_event` would filter it — skipping avoids the stat
+        // calls and PathBuf allocations for index-dir/hidden-dir churn.
         for path in &event.paths {
+            if should_skip_path(path, watched_dir, index_path) {
+                continue;
+            }
             path_to_change(&event.kind, path, watched_dir, index_path, &mut changes).await;
         }
     }

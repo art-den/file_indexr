@@ -19,20 +19,17 @@ fn make_config(watch_dir: &std::path::Path, index_dir: &std::path::Path) -> Arc<
     })
 }
 
-async fn found(
-    reader: &tantivy::IndexReader,
-    watch_dir: &std::path::Path,
-    q: &str,
-    cache: &crate::formats::TextDataCache,
-) -> usize {
+/// Total hits for `q`, read from the writer's own index and text cache.
+async fn found(writer: &IndexWriterWrapper, watch_dir: &std::path::Path, q: &str) -> usize {
+    let reader = writer.index().reader().unwrap();
     search(
-        reader,
+        &reader,
         SearchParams {
             q: q.to_string(),
             ..Default::default()
         },
         watch_dir,
-        cache,
+        writer.text_data_cache(),
         false,
         u64::MAX,
     )
@@ -72,26 +69,24 @@ async fn test_rescan_directory_recovers_lost_changes() {
 
     rescan_directory(&writer, &config).await.unwrap();
 
-    let reader = writer.index().reader().unwrap();
-    let cache = writer.text_data_cache();
     assert_eq!(
-        found(&reader, &watch_dir, "alpha modified", cache).await,
+        found(&writer, &watch_dir, "alpha modified").await,
         1,
         "modified content recovered"
     );
     assert_eq!(
-        found(&reader, &watch_dir, "gamma", cache).await,
+        found(&writer, &watch_dir, "gamma").await,
         1,
         "new file indexed"
     );
     assert_eq!(
-        found(&reader, &watch_dir, "beta", cache).await,
+        found(&writer, &watch_dir, "beta").await,
         0,
         "deleted file removed from index"
     );
 
     // Second rescan with no further changes: still consistent
     rescan_directory(&writer, &config).await.unwrap();
-    assert_eq!(found(&reader, &watch_dir, "gamma", cache).await, 1);
-    assert_eq!(found(&reader, &watch_dir, "beta", cache).await, 0);
+    assert_eq!(found(&writer, &watch_dir, "gamma").await, 1);
+    assert_eq!(found(&writer, &watch_dir, "beta").await, 0);
 }

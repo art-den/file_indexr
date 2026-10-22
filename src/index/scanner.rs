@@ -183,11 +183,14 @@ async fn needs_indexing(
 
 /// Recursively walk a directory tree asynchronously, yielding control after
 /// each `read_dir` so the tokio runtime can schedule other tasks.
+/// `dir_canonical` is the canonical path of `dir`. The walk only descends
+/// into real (non-symlink) entries, so canonical file paths are derived by
+/// joining entry names onto it — no per-file `canonicalize` syscall.
 /// A `read_dir` failure at any recursion level returns `Err` and fails the
 /// whole scan: an unreadable directory must not look like an empty one.
 async fn walk_directory(
     dir: &Path,
-    base_canonical: &Path,
+    dir_canonical: &Path,
     config: &Config,
     segments: &[SegmentReader],
     field: Field,
@@ -237,9 +240,14 @@ async fn walk_directory(
             if is_hidden_dir_name(&p) {
                 continue;
             }
+            // `dir_canonical` is canonical and the entry is a real directory
+            // (symlinks have their own file_type), so joining keeps it canonical.
+            let Some(sub_canonical) = p.file_name().map(|name| dir_canonical.join(name)) else {
+                continue;
+            };
             let (sub_processed, sub_changed) = Box::pin(walk_directory(
                 &p,
-                base_canonical,
+                &sub_canonical,
                 config,
                 segments,
                 field,
@@ -259,32 +267,27 @@ async fn walk_directory(
         }
 
         let rel = p.strip_prefix(base).unwrap_or(&p);
-        if rel.to_str().is_none() {
+        let Some(rel_str) = rel.to_str() else {
             warn!(path = %p.display(), "Skipping file with non-UTF8 path");
             continue;
-        }
+        };
         if !config.should_index(&p) {
             continue;
         }
 
         files_processed += 1;
 
-        // Canonicalize once per file, reuse for both lookup and event
-        let canonical_path = match tokio::fs::canonicalize(&p).await {
-            Ok(cp) => cp,
-            Err(_) => {
-                // If canonicalization fails, skip the file to avoid mismatched keys
-                continue;
-            }
+        // Derive the canonical path without a per-file `canonicalize`:
+        // `dir_canonical` is canonical and the entry is a real file (symlinks
+        // are filtered by file_type), so joining its name keeps it canonical.
+        // `rel_str` is the same component sequence the writer stores as the
+        // index key (canonical path stripped of the canonical base).
+        let Some(name) = p.file_name() else {
+            continue;
         };
-        // Canonical relative path for index lookup. Kept as Cow to avoid a
-        // per-file String allocation when the path is already valid UTF-8.
-        let canonical_rel = match canonical_path.strip_prefix(base_canonical) {
-            Ok(rel) => rel.to_string_lossy(),
-            Err(_) => continue,
-        };
+        let canonical_path = dir_canonical.join(name);
 
-        if needs_indexing(&p, segments, field, &canonical_rel).await? {
+        if needs_indexing(&p, segments, field, rel_str).await? {
             files_changed += 1;
             tx.send(FileChange::Modified(canonical_path))
                 .await

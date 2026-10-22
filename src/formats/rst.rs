@@ -29,6 +29,9 @@ const ADMONITIONS: &[&str] = &[
 /// Markdown fenced-code delimiter.
 const CODE_FENCE: &str = "```";
 
+/// ATX heading marks; sliced to the desired level (max heading level is 6).
+const HEADING_MARKS: &str = "######";
+
 static RE_ROLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#":[\w-]+:`([^`]+)`"#).unwrap());
 static RE_EXT_LINK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(\S+)\s*<(https?://[^>\s]+)>\s*_*"#).unwrap());
@@ -100,17 +103,11 @@ pub fn to_markdown(rst: &str) -> String {
         // List item (bullet or enumerated) at any indentation.
         if let Some((ordered, number, content)) = parse_list_item(line) {
             let indent = leading_ws(line);
-            let prefix = if ordered {
-                format!("{}. ", number)
+            out.push(if ordered {
+                format!("{indent}{number}. {}", convert_inline(content.trim()))
             } else {
-                "- ".to_string()
-            };
-            out.push(format!(
-                "{}{}{}",
-                indent,
-                prefix,
-                convert_inline(content.trim())
-            ));
+                format!("{indent}- {}", convert_inline(content.trim()))
+            });
             i += 1;
             continue;
         }
@@ -261,8 +258,12 @@ fn emit_title(out: &mut Vec<String>, text: &str, ch: char, levels: &mut Vec<char
             levels.len()
         }
     };
-    let hashes = "#".repeat(usize::min(level, 6));
-    out.push(format!("{} {}", hashes, convert_inline(text.trim())));
+    let level = usize::min(level, 6);
+    out.push(format!(
+        "{} {}",
+        &HEADING_MARKS[..level],
+        convert_inline(text.trim())
+    ));
 }
 
 /// Return `Some(ch)` if `line` is an unindented run of a single underline char.
@@ -292,11 +293,10 @@ fn parse_list_item(line: &str) -> Option<(bool, usize, &str)> {
         }
     }
 
-    let mut chars = t.chars().peekable();
-    match chars.peek() {
-        // Digits and the terminator are ASCII, so all offsets below are in bytes.
-        Some(c) if c.is_ascii_digit() => {
-            let bytes = t.as_bytes();
+    // Markers, terminators and separators are ASCII, so all offsets below are byte offsets.
+    let bytes = t.as_bytes();
+    match bytes.first() {
+        Some(b'0'..=b'9') => {
             let end = bytes
                 .iter()
                 .position(|b| !b.is_ascii_digit())
@@ -310,9 +310,9 @@ fn parse_list_item(line: &str) -> Option<(bool, usize, &str)> {
             }
             None
         }
-        Some('#') => {
+        Some(b'#') => {
             // Auto-numbered enumerated list: "#." or "#)".
-            if matches!(t.chars().nth(1), Some('.') | Some(')')) {
+            if matches!(bytes.get(1), Some(b'.') | Some(b')')) {
                 let rest = &t[2..];
                 if rest.starts_with(' ') || rest.starts_with('\t') {
                     return Some((true, 1, rest));
@@ -361,8 +361,7 @@ fn is_indented(line: &str) -> bool {
     line.starts_with(' ') || line.starts_with('\t')
 }
 
-fn leading_ws(line: &str) -> String {
-    line.chars()
-        .take_while(|c| *c == ' ' || *c == '\t')
-        .collect()
+fn leading_ws(line: &str) -> &str {
+    let rest = line.trim_start_matches([' ', '\t']);
+    &line[..line.len() - rest.len()]
 }

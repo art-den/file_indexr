@@ -222,11 +222,16 @@ fn compute_level(stack: &[StackEntry], kind: ItemKind) -> u8 {
             // Free fn at depth 0 → 2.
             // Method inside impl/trait/struct → 3.
             // Nested fn → 3+.
-            let has_container = stack
-                .iter()
-                .any(|e| matches!(e.kind, ItemKind::Imp | ItemKind::Trait | ItemKind::Struct));
-            let fn_count = stack.iter().filter(|e| e.kind == ItemKind::Fn).count();
-            let base = if has_container { 3 } else { 2 };
+            // Single pass; Mod entries count as neither container nor fn.
+            let mut base: usize = 2;
+            let mut fn_count: usize = 0;
+            for e in stack {
+                match e.kind {
+                    ItemKind::Imp | ItemKind::Trait | ItemKind::Struct => base = 3,
+                    ItemKind::Fn => fn_count += 1,
+                    ItemKind::Mod => {}
+                }
+            }
             (base + fn_count) as u8
         }
     }

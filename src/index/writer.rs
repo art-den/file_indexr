@@ -247,11 +247,13 @@ fn apply_delete_item(
     path_exact_field: Option<Field>,
     item: &ChangeItem,
 ) -> bool {
+    // Without PATH_EXACT nothing can be deleted: the item stays failed and the
+    // retry limit eventually drops it.
+    let Some(field) = path_exact_field else {
+        return false;
+    };
     match &item.data {
         Change::Delete(path_str) => {
-            let Some(field) = path_exact_field else {
-                return false;
-            };
             let term = Term::from_field_text(field, path_str);
             writer
                 .delete_query(Box::new(tantivy::query::TermQuery::new(
@@ -262,10 +264,6 @@ fn apply_delete_item(
                 .is_ok()
         }
         Change::DeleteDir(prefix) => {
-            let Some(field) = path_exact_field else {
-                return false;
-            };
-
             // tantivy's FST-based regex doesn't support ^/$ anchors.
             // Pattern `prefix.*` matches the full token since STRING fields
             // are stored as single tokens, making explicit anchoring unnecessary.
@@ -353,6 +351,15 @@ impl IndexWriterWrapper {
         &self.text_data_cache
     }
 
+    /// Relative index key for an already-canonical path, or `None` when the
+    /// path escapes the watched directory. Lossy conversion is safe here: a file
+    /// whose relative path is not valid UTF-8 is rejected by `DocumentModel`,
+    /// so it never produces a `PATH_EXACT` value to match against.
+    fn relative_key(&self, resolved: &Path) -> Option<String> {
+        let rel = resolved.strip_prefix(&self.base_canonical).ok()?;
+        Some(rel.to_string_lossy().to_string())
+    }
+
     /// Return canonical relative path.
     /// If the path no longer exists (e.g. deleted file/dir), recovers the path by
     /// canonicalizing the parent and reattaching the relative component.
@@ -384,10 +391,8 @@ impl IndexWriterWrapper {
                 base.join(suffix)
             }
         };
-        resolved
-            .strip_prefix(&self.base_canonical)
-            .map(|p| p.to_string_lossy().to_string())
-            .map_err(|_| anyhow::anyhow!("Path {} escapes watched directory", path.display()))
+        self.relative_key(&resolved)
+            .ok_or_else(|| anyhow::anyhow!("Path {} escapes watched directory", path.display()))
     }
 
     /// Buffer change items, committing if the buffer reaches `batch_size`.
@@ -414,10 +419,9 @@ impl IndexWriterWrapper {
         let resolved_path = tokio::fs::canonicalize(&path).await.map_err(|e| {
             anyhow::anyhow!("Failed to canonicalize path {}: {}", path.display(), e)
         })?;
-        let rel_path = resolved_path
-            .strip_prefix(&self.base_canonical)
-            .map(|p| p.to_string_lossy().to_string())
-            .map_err(|_| anyhow::anyhow!("Path {} escapes watched directory", path.display()))?;
+        let rel_path = self
+            .relative_key(&resolved_path)
+            .ok_or_else(|| anyhow::anyhow!("Path {} escapes watched directory", path.display()))?;
         // Drop any stale cached text before re-reading the file for indexing
         self.text_data_cache.invalidate(&resolved_path);
         let doc = DocumentModel::from_resolved_path(
@@ -496,7 +500,8 @@ impl IndexWriterWrapper {
             if buffer.is_empty() {
                 return true;
             }
-            buffer.drain(..).collect::<Vec<_>>()
+            // Take the buffer's allocation outright: no new Vec, no item copies.
+            std::mem::take(&mut *buffer)
         };
 
         let inner = Arc::clone(&self.inner);

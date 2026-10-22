@@ -15,12 +15,7 @@ pub fn structure(text: &str) -> FileStructure {
 
         if trimmed.starts_with("```") {
             in_code_block = !in_code_block;
-            continue;
-        }
-        if in_code_block {
-            continue;
-        }
-        if let Some((level, h_text)) = try_parse_atx_heading(trimmed) {
+        } else if !in_code_block && let Some((level, h_text)) = try_parse_atx_heading(trimmed) {
             raw_headings.push((total_lines, level, h_text.to_string()));
         }
     }
@@ -32,9 +27,15 @@ pub fn structure(text: &str) -> FileStructure {
 }
 
 fn try_parse_atx_heading(line: &str) -> Option<(u8, &str)> {
-    let level = usize::min(line.bytes().take_while(|&b| b == b'#').count(), 6);
-    let text = line[level..].trim();
-    (level > 0 && !text.is_empty()).then_some((level as u8, text))
+    // Bail out before slicing/trimming: most lines are not headings.
+    let hashes = line.bytes().take_while(|&b| b == b'#').count();
+    if hashes == 0 {
+        return None;
+    }
+    let level = usize::min(hashes, 6) as u8;
+    // `level` counts ASCII '#', so byte slicing is always on a char boundary.
+    let text = line[level as usize..].trim();
+    (!text.is_empty()).then_some((level, text))
 }
 
 pub fn build_heading_items(

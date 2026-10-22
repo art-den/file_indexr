@@ -104,7 +104,7 @@ async fn run_http_server(
     app_state: AppState,
     scan_task: tokio::task::JoinHandle<Result<u64>>,
 ) -> Result<()> {
-    let (watcher_shutdown_tx, mut watcher_done_rx, watcher_task) =
+    let (watcher_shutdown_tx, watcher_done_rx, watcher_task) =
         spawn_watcher(app_state.config.clone(), app_state.writer.clone());
 
     let addr = format!("{}:{}", app_state.config.bind, app_state.config.port);
@@ -119,14 +119,8 @@ async fn run_http_server(
     );
 
     let app = api::create_router(app_state);
-    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-        tokio::select! {
-            _ = shutdown_signal() => {},
-            _ = watcher_done_rx.changed() => {
-                info!("Watcher exited — triggering graceful shutdown");
-            }
-        }
-    });
+    let server =
+        axum::serve(listener, app).with_graceful_shutdown(wait_until_shutdown(watcher_done_rx));
 
     match server.await {
         Ok(()) => info!("HTTP server shut down gracefully"),
@@ -145,7 +139,7 @@ async fn run_stdio_mode(
 ) -> Result<()> {
     use file_indexr::mcp::stdio::run_stdio_loop;
 
-    let (watcher_shutdown_tx, mut watcher_done_rx, watcher_task) =
+    let (watcher_shutdown_tx, watcher_done_rx, watcher_task) =
         spawn_watcher(state.config.clone(), state.writer.clone());
 
     // Run the MCP STDIO loop. Graceful shutdown via SIGINT/SIGTERM.
@@ -169,14 +163,8 @@ async fn run_stdio_mode(
                 Err(anyhow::anyhow!("STDIO task panicked: {e}"))
             }
         },
-        _ = shutdown_signal() => {
-            info!("Shutdown signal received — stopping STDIO loop");
-            Ok(())
-        }
-        _ = watcher_done_rx.changed() => {
-            info!("Watcher exited — triggering graceful shutdown");
-            Ok(())
-        }
+        // Signal or watcher exit: a normal termination, so exit with status 0.
+        _ = wait_until_shutdown(watcher_done_rx) => Ok(()),
     };
 
     stop_watcher(watcher_shutdown_tx, watcher_task).await;
@@ -226,6 +214,18 @@ fn spawn_watcher(
 async fn stop_watcher(shutdown_tx: watch::Sender<bool>, task: tokio::task::JoinHandle<()>) {
     let _ = shutdown_tx.send(true);
     let _ = task.await;
+}
+
+/// Resolves when the process should start shutting down: either an explicit
+/// shutdown signal or the watcher supervisor exiting (the index pipeline is no
+/// longer maintained, so serving searches would silently go stale).
+async fn wait_until_shutdown(mut watcher_done_rx: watch::Receiver<bool>) {
+    tokio::select! {
+        _ = shutdown_signal() => {}
+        _ = watcher_done_rx.changed() => {
+            info!("Watcher exited — triggering graceful shutdown");
+        }
+    }
 }
 
 /// Listen for shutdown signals (SIGINT, SIGTERM).

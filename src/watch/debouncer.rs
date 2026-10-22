@@ -31,18 +31,16 @@ impl Debouncer {
     /// or [flush()][Self::flush].
     pub fn add(&mut self, path: PathBuf, now: Instant) -> Option<FileChange> {
         match self.pending.entry(path) {
-            // Window already expired: drop the stale entry and emit immediately.
-            Entry::Occupied(occ) if now.duration_since(*occ.get()) >= self.interval => {
-                // The key is consumed by `entry`, so clone it back out for the
-                // emitted event (rare path: window already expired).
-                let change = FileChange::Modified(occ.key().clone());
-                occ.remove();
-                Some(change)
-            }
-            // Within the window: refresh the timestamp.
             Entry::Occupied(mut occ) => {
-                *occ.get_mut() = now;
-                None
+                if now.duration_since(*occ.get()) >= self.interval {
+                    // Window expired: drop the stale entry and emit immediately.
+                    // `remove_entry` hands the key back, so no clone is needed.
+                    Some(FileChange::Modified(occ.remove_entry().0))
+                } else {
+                    // Within the window: refresh the timestamp.
+                    *occ.get_mut() = now;
+                    None
+                }
             }
             // New path: buffer the event.
             Entry::Vacant(vac) => {

@@ -59,13 +59,12 @@ impl AppError {
 
     /// Map a filesystem error to the domain error (NotFound vs generic I/O).
     pub fn from_io(error: std::io::Error, path: &Path) -> AppError {
+        let path = path.to_path_buf();
         if error.kind() == std::io::ErrorKind::NotFound {
-            AppError::NotFound {
-                path: path.to_path_buf(),
-            }
+            AppError::NotFound { path }
         } else {
             AppError::Io {
-                path: path.to_path_buf(),
+                path,
                 source: error,
             }
         }
@@ -80,7 +79,8 @@ impl AppError {
     pub fn unsupported_format(path: &Path) -> AppError {
         let extension = path
             .extension()
-            .map(|e| e.to_string_lossy().to_string())
+            // `into_owned` reuses the buffer only when the name is invalid UTF-8.
+            .map(|e| e.to_string_lossy().into_owned())
             .unwrap_or_else(|| "(no extension)".to_string());
         AppError::UnsupportedFormat { extension }
     }
@@ -88,14 +88,11 @@ impl AppError {
     /// Map a failed path validation to an error. Only non-`Valid` outcomes
     /// are valid input; the `Valid` variant must be handled by the caller.
     pub fn from_invalid_path(path: &str, result: PathValidateResult) -> AppError {
+        let path = PathBuf::from(path);
         match result {
             PathValidateResult::Valid(_) => unreachable!("called with a valid path"),
-            PathValidateResult::OutsideDirectory => AppError::OutsideDirectory {
-                path: path.to_string().into(),
-            },
-            PathValidateResult::NotFound => AppError::NotFound {
-                path: path.to_string().into(),
-            },
+            PathValidateResult::OutsideDirectory => AppError::OutsideDirectory { path },
+            PathValidateResult::NotFound => AppError::NotFound { path },
         }
     }
 }

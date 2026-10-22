@@ -44,7 +44,7 @@ impl HttpError {
 
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({"error": self.message}))).into_response()
+        error_response(self.status, self.message)
     }
 }
 
@@ -101,43 +101,33 @@ pub(crate) async fn search_handler(
     State(state): State<AppState>,
     Query(params): Query<SearchQuery>,
 ) -> Result<impl IntoResponse, HttpError> {
-    let SearchQuery {
-        q,
-        ext,
-        path,
-        search_content,
-        max_results,
-        sort_by,
-        sort_order,
-    } = params;
-
-    // `search::search` clamps the limit to [1, MAX_RESULTS_LIMIT] itself.
-    let max_results = max_results.unwrap_or(search::DEFAULT_MAX_RESULTS);
-
-    let sort_by = match sort_by.as_deref() {
+    let sort_by = match params.sort_by.as_deref() {
         Some("modified") => SortBy::Modified,
         Some("size") => SortBy::Size,
         Some("path") => SortBy::Path,
         _ => SortBy::Score,
     };
 
-    let sort_order = match sort_order.as_deref() {
+    let sort_order = match params.sort_order.as_deref() {
         Some("asc") => SortOrder::Asc,
         _ => SortOrder::Desc,
+    };
+
+    let search_params = SearchParams {
+        q: params.q.unwrap_or_default(),
+        search_content: params.search_content.unwrap_or(true),
+        ext: params.ext,
+        path: params.path,
+        // `search::search` clamps the limit to [1, MAX_RESULTS_LIMIT] itself.
+        max_results: params.max_results.unwrap_or(search::DEFAULT_MAX_RESULTS),
+        sort_by,
+        sort_order,
     };
 
     // The web UI renders snippets as HTML with <mark> highlighting.
     search::search(
         &state.reader,
-        SearchParams {
-            q: q.unwrap_or_default(),
-            search_content: search_content.unwrap_or(true),
-            ext,
-            path,
-            max_results,
-            sort_by,
-            sort_order,
-        },
+        search_params,
         &state.config.directory,
         &state.text_data_cache,
         true,

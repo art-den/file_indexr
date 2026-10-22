@@ -138,20 +138,38 @@ pub async fn load_file_text_data(
     Ok(data)
 }
 
+/// Known file extensions and the formats they map to.
+const FORMAT_BY_EXTENSION: &[(&str, FileFormat)] = &[
+    ("txt", FileFormat::Text),
+    ("md", FileFormat::Markdown),
+    ("rs", FileFormat::Rust),
+    ("py", FileFormat::Python),
+    ("htm", FileFormat::Html),
+    ("html", FileFormat::Html),
+    ("pdf", FileFormat::Pdf),
+    ("epub", FileFormat::Epub),
+    ("rst", FileFormat::Rst),
+    ("rest", FileFormat::Rst),
+];
+
 /// Detect the file format by extension (case-insensitive), if recognized.
 pub fn file_format_by_file_name(file_path: &Path) -> Option<FileFormat> {
-    // Lowercase so extensions like "TXT" or "HTML" match case-insensitively.
-    let ext = file_path.extension()?.to_str()?.to_ascii_lowercase();
-    match ext.as_str() {
-        "txt" => Some(FileFormat::Text),
-        "md" => Some(FileFormat::Markdown),
-        "rs" => Some(FileFormat::Rust),
-        "py" => Some(FileFormat::Python),
-        "htm" | "html" => Some(FileFormat::Html),
-        "pdf" => Some(FileFormat::Pdf),
-        "epub" => Some(FileFormat::Epub),
-        "rst" | "rest" => Some(FileFormat::Rst),
-        _ => None,
+    // `eq_ignore_ascii_case` matches "TXT" or "HTML" without allocating a
+    // lowercased copy; only ASCII extensions can ever match a table entry.
+    let ext = file_path.extension()?;
+    for &(name, format) in FORMAT_BY_EXTENSION {
+        if ext.eq_ignore_ascii_case(name) {
+            return Some(format);
+        }
+    }
+    None
+}
+
+/// Wrap a Markdown-converter failure into the domain `Conversion` error.
+fn conversion_error(file_path: &Path, error: anyhow::Error) -> AppError {
+    AppError::Conversion {
+        path: file_path.to_path_buf(),
+        detail: error.to_string(),
     }
 }
 
@@ -165,28 +183,16 @@ impl FileTextData {
         let text = match format {
             FileFormat::Html => html::load_from_file_and_convert_to_md(file_path)
                 .await
-                .map_err(|e| AppError::Conversion {
-                    path: file_path.to_path_buf(),
-                    detail: e.to_string(),
-                })?,
+                .map_err(|e| conversion_error(file_path, e))?,
             FileFormat::Pdf => pdf::load_from_file_and_convert_to_md(file_path)
                 .await
-                .map_err(|e| AppError::Conversion {
-                    path: file_path.to_path_buf(),
-                    detail: e.to_string(),
-                })?,
+                .map_err(|e| conversion_error(file_path, e))?,
             FileFormat::Epub => epub::load_from_file_and_convert_to_md(file_path)
                 .await
-                .map_err(|e| AppError::Conversion {
-                    path: file_path.to_path_buf(),
-                    detail: e.to_string(),
-                })?,
+                .map_err(|e| conversion_error(file_path, e))?,
             FileFormat::Rst => rst::load_from_file_and_convert_to_md(file_path)
                 .await
-                .map_err(|e| AppError::Conversion {
-                    path: file_path.to_path_buf(),
-                    detail: e.to_string(),
-                })?,
+                .map_err(|e| conversion_error(file_path, e))?,
             // Plain text cannot fail to "convert"; errors are I/O only.
             _ => text::load_string_from_file(file_path)
                 .await

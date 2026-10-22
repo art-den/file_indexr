@@ -80,21 +80,22 @@ fn test_truncate_all_multi_byte() {
 #[test]
 fn test_image_mime_type_supported() {
     use std::path::Path;
-    assert_eq!(image_mime_type(Path::new("a.png")).unwrap(), "image/png");
-    assert_eq!(image_mime_type(Path::new("a.jpg")).unwrap(), "image/jpeg");
-    assert_eq!(image_mime_type(Path::new("a.jpeg")).unwrap(), "image/jpeg");
-    assert_eq!(image_mime_type(Path::new("a.gif")).unwrap(), "image/gif");
-    assert_eq!(image_mime_type(Path::new("a.webp")).unwrap(), "image/webp");
-    assert_eq!(image_mime_type(Path::new("a.bmp")).unwrap(), "image/bmp");
-    assert_eq!(image_mime_type(Path::new("a.tiff")).unwrap(), "image/tiff");
-    assert_eq!(image_mime_type(Path::new("a.tif")).unwrap(), "image/tiff");
-    assert_eq!(image_mime_type(Path::new("a.ico")).unwrap(), "image/x-icon");
-    assert_eq!(
-        image_mime_type(Path::new("a.svg")).unwrap(),
-        "image/svg+xml"
-    );
-    // Extensions are case-insensitive
-    assert_eq!(image_mime_type(Path::new("a.PnG")).unwrap(), "image/png");
+    let cases = [
+        ("a.png", "image/png"),
+        ("a.jpg", "image/jpeg"),
+        ("a.jpeg", "image/jpeg"),
+        ("a.gif", "image/gif"),
+        ("a.webp", "image/webp"),
+        ("a.bmp", "image/bmp"),
+        ("a.tiff", "image/tiff"),
+        ("a.tif", "image/tiff"),
+        ("a.ico", "image/x-icon"),
+        ("a.svg", "image/svg+xml"),
+        ("a.PnG", "image/png"), // extensions are case-insensitive
+    ];
+    for (name, expected) in cases {
+        assert_eq!(image_mime_type(Path::new(name)).unwrap(), expected);
+    }
 }
 
 #[test]

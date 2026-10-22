@@ -4,6 +4,16 @@ fn make_temp_dir() -> PathBuf {
     crate::testutil::unique_temp_dir("formats_test")
 }
 
+/// Loads `path` expecting failure and returns the resulting error.
+///
+/// Uses `let-else` rather than `unwrap_err` because `FileTextData` is not `Debug`.
+async fn load_err(cache: &TextDataCache, path: &Path, max_bytes: u64) -> AppError {
+    let Err(err) = load_file_text_data(cache, path, max_bytes).await else {
+        panic!("expected an error for {}", path.display());
+    };
+    err
+}
+
 #[tokio::test]
 async fn test_invalidate_text_data_cache() {
     let file = make_temp_dir().join("cache_entry.txt");
@@ -83,25 +93,19 @@ async fn test_load_rejects_missing_dir_oversized_and_unknown_format() {
 
     // Missing file -> NotFound.
     let missing = dir.join("missing.txt");
-    let Err(err) = load_file_text_data(&cache, &missing, u64::MAX).await else {
-        panic!("expected an error for a missing file");
-    };
+    let err = load_err(&cache, &missing, u64::MAX).await;
     assert!(matches!(err, AppError::NotFound { .. }), "{err}");
 
     // Directory -> NotAFile.
     let subdir = dir.join("subdir");
     std::fs::create_dir(&subdir).unwrap();
-    let Err(err) = load_file_text_data(&cache, &subdir, u64::MAX).await else {
-        panic!("expected an error for a directory");
-    };
+    let err = load_err(&cache, &subdir, u64::MAX).await;
     assert!(matches!(err, AppError::NotAFile { .. }), "{err}");
 
     // File over max_bytes -> TooLarge, rejected before reading.
     let large = dir.join("large.txt");
     std::fs::write(&large, [0u8; 16]).unwrap();
-    let Err(err) = load_file_text_data(&cache, &large, 8).await else {
-        panic!("expected an error for an oversized file");
-    };
+    let err = load_err(&cache, &large, 8).await;
     assert!(
         matches!(err, AppError::TooLarge { size: 16, limit: 8 }),
         "{err}"
@@ -110,9 +114,7 @@ async fn test_load_rejects_missing_dir_oversized_and_unknown_format() {
     // Unrecognized extension -> UnsupportedFormat.
     let unknown = dir.join("file.xyz");
     std::fs::write(&unknown, "data").unwrap();
-    let Err(err) = load_file_text_data(&cache, &unknown, u64::MAX).await else {
-        panic!("expected an error for an unknown format");
-    };
+    let err = load_err(&cache, &unknown, u64::MAX).await;
     assert!(matches!(err, AppError::UnsupportedFormat { .. }), "{err}");
 }
 

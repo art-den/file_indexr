@@ -1,93 +1,9 @@
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::formats::{FileFormat, FileTextData};
 
 use super::*;
-
-fn image_test_epub(dir: &Path, name: &str, entries: &[(&str, Vec<u8>)]) -> std::path::PathBuf {
-    let path = dir.join(name);
-    write_zip_bytes(&path, entries);
-    path
-}
-
-fn image_epub_entries(png_name: &str) -> Vec<(&str, Vec<u8>)> {
-    vec![
-        ("META-INF/container.xml", CONTAINER.as_bytes().to_vec()),
-        ("OEBPS/content.opf", b"<package/>".to_vec()),
-        ("OEBPS/Text/ch1.xhtml", b"<html/>".to_vec()),
-        (png_name, b"PNGDATA".to_vec()),
-    ]
-}
-
-#[test]
-fn test_epub_read_image_entry() {
-    let dir = crate::testutil::unique_temp_dir("epub_img_test");
-    let path = image_test_epub(
-        &dir,
-        "book.epub",
-        &image_epub_entries("OEBPS/Text/images/pic.png"),
-    );
-
-    // Document-relative path resolves via the unique suffix.
-    let (name, bytes) = read_image_entry(&path, "images/pic.png", 1024).unwrap();
-    assert_eq!(name, "OEBPS/Text/images/pic.png");
-    assert_eq!(bytes.as_slice(), b"PNGDATA");
-
-    // The literal archive entry path also works.
-    let (name, _) = read_image_entry(&path, "OEBPS/Text/images/pic.png", 1024).unwrap();
-    assert_eq!(name, "OEBPS/Text/images/pic.png");
-
-    // Leading '/' and '#fragment' are stripped.
-    let (name, _) = read_image_entry(&path, "/OEBPS/Text/images/pic.png#fig", 1024).unwrap();
-    assert_eq!(name, "OEBPS/Text/images/pic.png");
-
-    // Not found.
-    let err = read_image_entry(&path, "nope.png", 1024).unwrap_err();
-    assert!(err.to_string().contains("not found"));
-
-    // Empty target after stripping.
-    assert!(read_image_entry(&path, "#frag", 1024).is_err());
-    assert!(read_image_entry(&path, "/", 1024).is_err());
-}
-
-#[test]
-fn test_epub_read_image_entry_ambiguous_and_limits() {
-    let dir = crate::testutil::unique_temp_dir("epub_img_test2");
-    let path = image_test_epub(
-        &dir,
-        "ambig.epub",
-        &[
-            ("META-INF/container.xml", CONTAINER.as_bytes().to_vec()),
-            ("a/images/pic.png", b"A".to_vec()),
-            ("b/images/pic.png", b"B".to_vec()),
-        ],
-    );
-
-    // Two suffix matches → ambiguity with candidates.
-    let msg = read_image_entry(&path, "images/pic.png", 1024)
-        .unwrap_err()
-        .to_string();
-    assert!(msg.contains("Ambiguous"));
-    assert!(msg.contains("a/images/pic.png"));
-    assert!(msg.contains("b/images/pic.png"));
-
-    // Literal paths still work.
-    let (name, bytes) = read_image_entry(&path, "b/images/pic.png", 1024).unwrap();
-    assert_eq!(name, "b/images/pic.png");
-    assert_eq!(bytes.as_slice(), b"B");
-
-    // Size limit (entry is 1 byte, limit 0).
-    let msg = read_image_entry(&path, "a/images/pic.png", 0)
-        .unwrap_err()
-        .to_string();
-    assert!(msg.contains("too large"));
-
-    // Not a zip archive.
-    let not_zip = dir.join("notzip.epub");
-    std::fs::write(&not_zip, b"no zip here").unwrap();
-    assert!(read_image_entry(&not_zip, "x.png", 1024).is_err());
-}
 
 const CONTAINER: &str = r#"<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -96,27 +12,21 @@ const CONTAINER: &str = r#"<?xml version="1.0"?>
 </rootfiles>
 </container>"#;
 
-fn write_zip(path: &Path, entries: &[(&str, &str)]) {
+/// Write a zip archive with the given entries (raw bytes allow non-UTF-8 content).
+fn write_zip<B: AsRef<[u8]>>(path: &Path, entries: &[(&str, B)]) {
     let file = std::fs::File::create(path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default();
     for (name, content) in entries {
         zip.start_file(name, options).unwrap();
-        zip.write_all(content.as_bytes()).unwrap();
+        zip.write_all(content.as_ref()).unwrap();
     }
     zip.finish().unwrap();
 }
 
-/// Like `write_zip`, but takes raw bytes so entries can hold non-UTF-8 content.
-fn write_zip_bytes(path: &Path, entries: &[(&str, Vec<u8>)]) {
-    let file = std::fs::File::create(path).unwrap();
-    let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default();
-    for (name, content) in entries {
-        zip.start_file(name, options).unwrap();
-        zip.write_all(content).unwrap();
-    }
-    zip.finish().unwrap();
+/// Path to a file named `name` inside a fresh temp dir tagged with `tag`.
+fn temp_epub(tag: &str, name: &str) -> PathBuf {
+    crate::testutil::unique_temp_dir(tag).join(name)
 }
 
 fn build_epub(path: &Path) {
@@ -150,10 +60,82 @@ fn build_epub(path: &Path) {
     );
 }
 
+#[test]
+fn test_epub_read_image_entry() {
+    let path = temp_epub("epub_img_test", "book.epub");
+    write_zip(
+        &path,
+        &[
+            ("META-INF/container.xml", CONTAINER.as_bytes().to_vec()),
+            ("OEBPS/content.opf", b"<package/>".to_vec()),
+            ("OEBPS/Text/ch1.xhtml", b"<html/>".to_vec()),
+            ("OEBPS/Text/images/pic.png", b"PNGDATA".to_vec()),
+        ],
+    );
+
+    // Document-relative path resolves via the unique suffix.
+    let (name, bytes) = read_image_entry(&path, "images/pic.png", 1024).unwrap();
+    assert_eq!(name, "OEBPS/Text/images/pic.png");
+    assert_eq!(bytes.as_slice(), b"PNGDATA");
+
+    // The literal archive entry path also works.
+    let (name, _) = read_image_entry(&path, "OEBPS/Text/images/pic.png", 1024).unwrap();
+    assert_eq!(name, "OEBPS/Text/images/pic.png");
+
+    // Leading '/' and '#fragment' are stripped.
+    let (name, _) = read_image_entry(&path, "/OEBPS/Text/images/pic.png#fig", 1024).unwrap();
+    assert_eq!(name, "OEBPS/Text/images/pic.png");
+
+    // Not found.
+    let err = read_image_entry(&path, "nope.png", 1024).unwrap_err();
+    assert!(err.to_string().contains("not found"));
+
+    // Empty target after stripping.
+    assert!(read_image_entry(&path, "#frag", 1024).is_err());
+    assert!(read_image_entry(&path, "/", 1024).is_err());
+}
+
+#[test]
+fn test_epub_read_image_entry_ambiguous_and_limits() {
+    let dir = crate::testutil::unique_temp_dir("epub_img_test2");
+    let path = dir.join("ambig.epub");
+    write_zip(
+        &path,
+        &[
+            ("META-INF/container.xml", CONTAINER.as_bytes().to_vec()),
+            ("a/images/pic.png", b"A".to_vec()),
+            ("b/images/pic.png", b"B".to_vec()),
+        ],
+    );
+
+    // Two suffix matches → ambiguity with candidates.
+    let msg = read_image_entry(&path, "images/pic.png", 1024)
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("Ambiguous"));
+    assert!(msg.contains("a/images/pic.png"));
+    assert!(msg.contains("b/images/pic.png"));
+
+    // Literal paths still work.
+    let (name, bytes) = read_image_entry(&path, "b/images/pic.png", 1024).unwrap();
+    assert_eq!(name, "b/images/pic.png");
+    assert_eq!(bytes.as_slice(), b"B");
+
+    // Size limit (entry is 1 byte, limit 0).
+    let msg = read_image_entry(&path, "a/images/pic.png", 0)
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("too large"));
+
+    // Not a zip archive.
+    let not_zip = dir.join("notzip.epub");
+    std::fs::write(&not_zip, b"no zip here").unwrap();
+    assert!(read_image_entry(&not_zip, "x.png", 1024).is_err());
+}
+
 #[tokio::test]
 async fn test_epub_non_utf8_html_entry() {
-    let dir = crate::testutil::unique_temp_dir("epub_test");
-    let path = dir.join("latin1.epub");
+    let path = temp_epub("epub_test", "latin1.epub");
 
     let opf = r#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
@@ -172,12 +154,12 @@ async fn test_epub_non_utf8_html_entry() {
     let ch1 = "<html><head><meta charset=\"windows-1252\"/></head><body><p>Caf\u{e9} r\u{e9}sum\u{e9}</p></body></html>";
     let ch1_bytes = encoding_rs::WINDOWS_1252.encode(ch1).0.into_owned();
 
-    write_zip_bytes(
+    write_zip(
         &path,
         &[
-            ("META-INF/container.xml", CONTAINER.as_bytes().to_vec()),
-            ("OEBPS/content.opf", opf.as_bytes().to_vec()),
-            ("OEBPS/Text/ch1.xhtml", ch1_bytes),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            ("OEBPS/Text/ch1.xhtml", ch1_bytes.as_slice()),
         ],
     );
 
@@ -192,8 +174,7 @@ async fn test_epub_non_utf8_html_entry() {
 
 #[tokio::test]
 async fn test_epub_to_markdown() {
-    let dir = crate::testutil::unique_temp_dir("epub_test");
-    let path = dir.join("book.epub");
+    let path = temp_epub("epub_test", "book.epub");
     build_epub(&path);
 
     let data = FileTextData::load(&path).await.unwrap();
@@ -212,8 +193,7 @@ async fn test_epub_to_markdown() {
 
 #[tokio::test]
 async fn test_epub_absolute_and_fragment_hrefs() {
-    let dir = crate::testutil::unique_temp_dir("epub_test");
-    let path = dir.join("book.epub");
+    let path = temp_epub("epub_test", "book.epub");
     // Package-absolute href with a leading '/', a '#fragment' suffix,
     // a dangling idref, and a valid idref whose file is absent from the
     // archive — all must be skipped without failing the book.
@@ -257,8 +237,7 @@ async fn test_epub_absolute_and_fragment_hrefs() {
 
 #[tokio::test]
 async fn test_epub_missing_container_errors() {
-    let dir = crate::testutil::unique_temp_dir("epub_test");
-    let path = dir.join("book.epub");
+    let path = temp_epub("epub_test", "book.epub");
     write_zip(
         &path,
         &[(
@@ -276,8 +255,7 @@ async fn test_epub_missing_container_errors() {
 
 #[tokio::test]
 async fn test_epub_root_level_opf() {
-    let dir = crate::testutil::unique_temp_dir("epub_test");
-    let path = dir.join("book.epub");
+    let path = temp_epub("epub_test", "book.epub");
     // The OPF sits at the archive root, so relative hrefs resolve directly.
     let container = r#"<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -315,8 +293,7 @@ async fn test_epub_root_level_opf() {
 
 #[tokio::test]
 async fn test_epub_empty_spine_errors() {
-    let dir = crate::testutil::unique_temp_dir("epub_test");
-    let path = dir.join("book.epub");
+    let path = temp_epub("epub_test", "book.epub");
     let opf = r#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
 <manifest>
@@ -341,8 +318,7 @@ async fn test_epub_empty_spine_errors() {
 
 #[tokio::test]
 async fn test_epub_title_with_nested_markup() {
-    let dir = crate::testutil::unique_temp_dir("epub_test");
-    let path = dir.join("book.epub");
+    let path = temp_epub("epub_test", "book.epub");
     // The title may contain nested markup and entities; both must be
     // stripped/decoded when the H1 is prepended.
     let opf = r#"<?xml version="1.0"?>
@@ -377,8 +353,7 @@ async fn test_epub_title_with_nested_markup() {
 
 #[tokio::test]
 async fn test_epub_missing_title() {
-    let dir = crate::testutil::unique_temp_dir("epub_test");
-    let path = dir.join("book.epub");
+    let path = temp_epub("epub_test", "book.epub");
     // No <metadata> at all: the book title H1 must not be prepended.
     let opf = r#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
@@ -410,8 +385,7 @@ async fn test_epub_missing_title() {
 
 #[tokio::test]
 async fn test_epub_missing_opf_errors() {
-    let dir = crate::testutil::unique_temp_dir("epub_test");
-    let path = dir.join("book.epub");
+    let path = temp_epub("epub_test", "book.epub");
     // The container points to an OPF that is absent from the archive.
     write_zip(&path, &[("META-INF/container.xml", CONTAINER)]);
 
@@ -424,8 +398,7 @@ async fn test_epub_missing_opf_errors() {
 
 #[tokio::test]
 async fn test_epub_structure() {
-    let dir = crate::testutil::unique_temp_dir("epub_test");
-    let path = dir.join("book.epub");
+    let path = temp_epub("epub_test", "book.epub");
     build_epub(&path);
 
     let data = FileTextData::load(&path).await.unwrap();

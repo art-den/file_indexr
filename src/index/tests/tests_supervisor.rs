@@ -9,14 +9,9 @@ fn test_backoff_delay_sequence() {
     assert_eq!(backoff_delay(3), Duration::from_secs(20));
     // The 7th failure gives up without sleeping, but the cap branch of
     // the pure function is exercised by the attempt-7 value.
-    assert_eq!(
-        backoff_delay(7),
-        Duration::from_secs(MAX_WATCHER_RETRY_DELAY_SECS)
-    );
-    assert_eq!(
-        backoff_delay(100),
-        Duration::from_secs(MAX_WATCHER_RETRY_DELAY_SECS)
-    );
+    let capped = Duration::from_secs(MAX_WATCHER_RETRY_DELAY_SECS);
+    assert_eq!(backoff_delay(7), capped);
+    assert_eq!(backoff_delay(100), capped);
 
     // The sequence must be non-decreasing.
     let mut previous = backoff_delay(1);

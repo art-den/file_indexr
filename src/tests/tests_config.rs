@@ -1,11 +1,10 @@
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::testutil;
 
 use super::*;
 
-fn make_temp_config(content: &str) -> std::path::PathBuf {
+fn make_temp_config(content: &str) -> PathBuf {
     let path = testutil::unique_temp_dir("test").join("config.toml");
     std::fs::write(&path, content).unwrap();
     path
@@ -29,6 +28,30 @@ fn make_test_args(directory: Option<PathBuf>) -> Args {
         verbose: false,
         stdio: false,
     }
+}
+
+/// `merge_config` that discards the transport mode (irrelevant here).
+fn merged(args: Args, file: Option<ConfigFile>) -> Config {
+    merge_config(args, file).unwrap().0
+}
+
+/// Config from a directory-only CLI invocation (no config file).
+fn config_from_dir(dir: &Path) -> Config {
+    merged(make_test_args(Some(dir.to_path_buf())), None)
+}
+
+/// Write TOML to a temp file and load it as a file config (for merge tests).
+async fn file_config_from(content: &str) -> Option<ConfigFile> {
+    let path = make_temp_config(content);
+    load_config_file(&path).await.ok()
+}
+
+/// Re-express `dir` in a non-canonical form containing a `..` component.
+fn with_dotdot(dir: &Path) -> PathBuf {
+    let base = dir.parent().unwrap();
+    base.join("..")
+        .join(base.file_name().unwrap())
+        .join(dir.file_name().unwrap())
 }
 
 #[tokio::test]
@@ -85,22 +108,22 @@ max_file_sise_mb = 50
 #[tokio::test]
 async fn test_merge_cli_overrides_file() {
     let temp_dir = make_temp_dir();
-    let path = make_temp_config(&format!(
+    let file_config = file_config_from(&format!(
         r#"
 directory = "{}"
 port = 9090
 bind = "0.0.0.0"
 "#,
         temp_dir.display()
-    ));
+    ))
+    .await;
 
     let mut args = make_test_args(None);
     args.index_path = Some(PathBuf::from("/custom/index"));
     args.port = Some(8080);
     args.bind = Some("127.0.0.1".to_string());
 
-    let file_config = load_config_file(&path).await.ok();
-    let (config, _) = merge_config(args, file_config).unwrap();
+    let config = merged(args, file_config);
 
     // Directory from file
     assert_eq!(config.directory, temp_dir);
@@ -115,9 +138,7 @@ bind = "0.0.0.0"
 #[test]
 fn test_merge_directory_from_cli() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir.clone()));
-
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = config_from_dir(&temp_dir);
     assert_eq!(config.directory, temp_dir);
     // Default index path is <directory>/.file_indexr/index
     assert_eq!(
@@ -137,35 +158,24 @@ fn test_merge_no_directory_errors() {
 
 #[test]
 fn test_validate_missing_directory() {
-    let _temp_dir = make_temp_dir();
-    let args = make_test_args(Some(PathBuf::from("/nonexistent_dir_xyz")));
-
-    let (config, _) = merge_config(args, None).unwrap();
-    let result = config.validate();
-    assert!(result.is_err());
+    let config = config_from_dir(Path::new("/nonexistent_dir_xyz"));
+    assert!(config.validate().is_err());
 }
 
 #[test]
 fn test_validate_valid() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir.clone()));
-
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = config_from_dir(&temp_dir);
     assert!(config.validate().is_ok());
 }
 
 #[tokio::test]
 async fn test_canonicalize_paths_resolves_dotdot() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir.clone()));
-    let (mut config, _) = merge_config(args, None).unwrap();
+    let mut config = config_from_dir(&temp_dir);
 
     // Re-express the directory in a non-canonical form containing `..`
-    let base = temp_dir.parent().unwrap();
-    config.directory = base
-        .join("..")
-        .join(base.file_name().unwrap())
-        .join(temp_dir.file_name().unwrap());
+    config.directory = with_dotdot(&temp_dir);
 
     config.canonicalize_paths().await.unwrap();
 
@@ -194,8 +204,7 @@ async fn test_canonicalize_paths_resolves_symlink_directory() {
         real_dir.file_name().unwrap().to_string_lossy()
     ));
     std::os::unix::fs::symlink(&real_dir, &link).unwrap();
-    let args = make_test_args(Some(link));
-    let (mut config, _) = merge_config(args, None).unwrap();
+    let mut config = config_from_dir(&link);
 
     config.canonicalize_paths().await.unwrap();
 
@@ -213,18 +222,13 @@ async fn test_canonicalize_paths_resolves_symlink_directory() {
 #[tokio::test]
 async fn test_canonicalize_paths_custom_non_hidden_index() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir.clone()));
-    let (mut config, _) = merge_config(args, None).unwrap();
+    let mut config = config_from_dir(&temp_dir);
 
     // Custom non-hidden index dir inside the watched dir (the default
     // `.file_indexr` is masked by the hidden-component check anyway),
     // plus a `..` in the directory form so the raw forms diverge.
     config.index_path = temp_dir.join("idx").join("data");
-    let base = temp_dir.parent().unwrap();
-    config.directory = base
-        .join("..")
-        .join(base.file_name().unwrap())
-        .join(temp_dir.file_name().unwrap());
+    config.directory = with_dotdot(&temp_dir);
 
     config.canonicalize_paths().await.unwrap();
 
@@ -240,18 +244,16 @@ async fn test_canonicalize_paths_custom_non_hidden_index() {
 #[tokio::test]
 async fn test_allowed_extensions_from_config() {
     let temp_dir = make_temp_dir();
-    let path = make_temp_config(&format!(
+    let file_config = file_config_from(&format!(
         r#"
 directory = "{}"
 allowed_extensions = ["md", "txt", "html"]
 "#,
         temp_dir.display()
-    ));
+    ))
+    .await;
 
-    let args = make_test_args(None);
-
-    let file_config = load_config_file(&path).await.ok();
-    let (config, _) = merge_config(args, file_config).unwrap();
+    let config = merged(make_test_args(None), file_config);
     assert_eq!(config.allowed_extensions.len(), 3);
     assert!(config.allowed_extensions.contains(&"md".to_string()));
     assert!(config.allowed_extensions.contains(&"txt".to_string()));
@@ -261,18 +263,14 @@ allowed_extensions = ["md", "txt", "html"]
 #[test]
 fn test_allowed_extensions_empty_by_default() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir));
-
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = config_from_dir(&temp_dir);
     assert!(config.allowed_extensions.is_empty());
 }
 
 #[test]
 fn test_default_indexes_only_recognized_formats() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir));
-
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = config_from_dir(&temp_dir);
     assert!(config.should_index(Path::new("notes.txt")));
     assert!(config.should_index(Path::new("doc.PDF")));
     assert!(config.should_index(Path::new("src/main.rs")));
@@ -284,18 +282,16 @@ fn test_default_indexes_only_recognized_formats() {
 #[tokio::test]
 async fn test_allowed_extensions_from_config_are_normalized() {
     let temp_dir = make_temp_dir();
-    let path = make_temp_config(&format!(
+    let file_config = file_config_from(&format!(
         r#"
 directory = "{}"
 allowed_extensions = [".md", " TXT", "md"]
 "#,
         temp_dir.display()
-    ));
+    ))
+    .await;
 
-    let args = make_test_args(None);
-
-    let file_config = load_config_file(&path).await.ok();
-    let (config, _) = merge_config(args, file_config).unwrap();
+    let config = merged(make_test_args(None), file_config);
     assert_eq!(
         config.allowed_extensions,
         vec!["md".to_string(), "txt".to_string()]
@@ -334,7 +330,7 @@ fn test_merge_cli_allowed_extensions_trims_whitespace() {
     let mut args = make_test_args(Some(temp_dir));
     args.allowed_extensions = Some(vec!["md".to_string(), " txt".to_string()]);
 
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = merged(args, None);
     assert_eq!(
         config.allowed_extensions,
         vec!["md".to_string(), "txt".to_string()]
@@ -349,7 +345,7 @@ fn test_normalized_extensions_match_should_index() {
     let mut args = make_test_args(Some(temp_dir));
     args.allowed_extensions = Some(vec![".md".to_string(), " txt".to_string()]);
 
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = merged(args, None);
     assert!(config.should_index(Path::new("a.md")));
     assert!(config.should_index(Path::new("a.MD")));
     assert!(config.should_index(Path::new("b.txt")));
@@ -359,7 +355,7 @@ fn test_normalized_extensions_match_should_index() {
 
 #[tokio::test]
 async fn test_merge_file_config_fallback() {
-    let path = make_temp_config(
+    let file_config = file_config_from(
         r#"
 directory = "/tmp/test"
 port = 9090
@@ -368,13 +364,13 @@ max_file_size_mb = 10
 batch_size = 200
 batch_timeout_ms = 5000
 "#,
-    );
+    )
+    .await;
 
     // CLI doesn't specify any optional fields
     let args = make_test_args(None);
 
-    let file_config = load_config_file(&path).await.ok();
-    let (config, _) = merge_config(args, file_config).unwrap();
+    let config = merged(args, file_config);
 
     // All values should come from the config file
     assert_eq!(config.port, 9090);
@@ -387,9 +383,7 @@ batch_timeout_ms = 5000
 #[test]
 fn test_merge_defaults_when_nothing_specified() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir));
-
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = config_from_dir(&temp_dir);
 
     // All values should be defaults
     assert_eq!(config.port, DEFAULT_PORT);
@@ -402,8 +396,7 @@ fn test_merge_defaults_when_nothing_specified() {
 #[tokio::test]
 async fn test_validate_path_rejects_dotdot_component() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir.clone()));
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = config_from_dir(&temp_dir);
 
     // ".." as a path component must be rejected
     assert!(matches!(
@@ -419,8 +412,7 @@ async fn test_validate_path_rejects_dotdot_component() {
 #[tokio::test]
 async fn test_validate_path_allows_dotdot_in_filename() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir.clone()));
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = config_from_dir(&temp_dir);
 
     // Files with ".." in their name are legitimate
     std::fs::write(temp_dir.join("a..b.txt"), "content").unwrap();
@@ -439,8 +431,7 @@ async fn test_validate_path_allows_dotdot_in_filename() {
 #[tokio::test]
 async fn test_validate_path_rejects_absolute() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir.clone()));
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = config_from_dir(&temp_dir);
 
     assert!(matches!(
         config.validate_path("/etc/passwd").await,
@@ -451,8 +442,7 @@ async fn test_validate_path_rejects_absolute() {
 #[tokio::test]
 async fn test_validate_path_not_found() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir.clone()));
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = config_from_dir(&temp_dir);
 
     assert!(matches!(
         config.validate_path("nonexistent.txt").await,
@@ -463,8 +453,7 @@ async fn test_validate_path_not_found() {
 #[tokio::test]
 async fn test_validate_path_valid_subdir() {
     let temp_dir = make_temp_dir();
-    let args = make_test_args(Some(temp_dir.clone()));
-    let (config, _) = merge_config(args, None).unwrap();
+    let config = config_from_dir(&temp_dir);
 
     std::fs::create_dir_all(temp_dir.join("sub")).unwrap();
     std::fs::write(temp_dir.join("sub").join("file.txt"), "ok").unwrap();

@@ -116,9 +116,9 @@ pub struct Args {
 pub async fn load_config_file(path: &Path) -> Result<ConfigFile, String> {
     let content = tokio::fs::read_to_string(path)
         .await
-        .map_err(|e| format_io_error("read config file", path, &e))?;
-    let config: ConfigFile = toml::from_str(&content)
-        .map_err(|e| format!("Failed to parse config file {}: {}", path.display(), e))?;
+        .map_err(|e| format_path_error("read config file", path, &e))?;
+    let config: ConfigFile =
+        toml::from_str(&content).map_err(|e| format_path_error("parse config file", path, &e))?;
     Ok(config)
 }
 
@@ -145,8 +145,8 @@ fn pick<T>(cli: Option<T>, file: Option<T>, default: T) -> T {
     cli.or(file).unwrap_or(default)
 }
 
-/// Format an I/O error with the action it failed on and the path involved.
-fn format_io_error(action: &str, path: &Path, error: &std::io::Error) -> String {
+/// Format an error that failed on a path, with the action and path involved.
+fn format_path_error(action: &str, path: &Path, error: &impl std::fmt::Display) -> String {
     format!("Failed to {action} {}: {}", path.display(), error)
 }
 
@@ -166,8 +166,11 @@ pub fn merge_config(
         .or(file_config.directory)
         .ok_or("Directory must be specified via --directory or config file")?;
 
-    let base_index_path = directory.join(".file_indexr").join("index");
-    let index_path = pick(args.index_path, file_config.index_path, base_index_path);
+    // Default built lazily: allocation-free when CLI or file provides an index path.
+    let index_path = args
+        .index_path
+        .or(file_config.index_path)
+        .unwrap_or_else(|| directory.join(".file_indexr").join("index"));
 
     let port = pick(args.port, file_config.port, DEFAULT_PORT);
     let bind = pick(args.bind, file_config.bind, DEFAULT_BIND.to_string());
@@ -246,15 +249,15 @@ impl Config {
     pub async fn canonicalize_paths(&mut self) -> Result<(), String> {
         self.directory = tokio::fs::canonicalize(&self.directory)
             .await
-            .map_err(|e| format_io_error("canonicalize directory", &self.directory, &e))?;
+            .map_err(|e| format_path_error("canonicalize directory", &self.directory, &e))?;
 
         // Create the index directory first: canonicalize requires the path to exist.
         tokio::fs::create_dir_all(&self.index_path)
             .await
-            .map_err(|e| format_io_error("create index directory", &self.index_path, &e))?;
+            .map_err(|e| format_path_error("create index directory", &self.index_path, &e))?;
         self.index_path = tokio::fs::canonicalize(&self.index_path)
             .await
-            .map_err(|e| format_io_error("canonicalize index path", &self.index_path, &e))?;
+            .map_err(|e| format_path_error("canonicalize index path", &self.index_path, &e))?;
 
         Ok(())
     }
